@@ -26,6 +26,10 @@ data/
 *.feather
 !tests/**/*.csv
 
+# 生成物（デモのチャート等）
+demo.png
+*.demo.png
+
 # Notebooks
 .ipynb_checkpoints/
 

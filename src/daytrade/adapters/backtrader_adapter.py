@@ -16,16 +16,17 @@ backtrader をインストール（requirements.txt のコメントを外す）�
 
 from __future__ import annotations
 
-from daytrade.core.indicators import atr as _atr_series  # noqa: F401  (将来利用)
+from daytrade.core.risk import position_size
 from daytrade.core.signals import decide, initial_stops
 from daytrade.core.types import Action, Features, PositionState, StrategyParams
 
 
-def make_strategy(params: StrategyParams):
+def make_strategy(params: StrategyParams, *, risk_fraction: float = 0.05, lot_size: int = 100):
     """StrategyParams を束ねた Backtrader Strategy クラスを返すファクトリ。
 
     backtrader を遅延 import するため、関数内で定義している。
     指標は backtrader 組み込みの indicator を使い、Features に詰めて decide() に渡す。
+    株数は基準実装と同じ core.risk.position_size で決める（二重検証のズレを抑えるため）。
     """
     import backtrader as bt
 
@@ -87,11 +88,16 @@ def make_strategy(params: StrategyParams):
 
             if action == Action.ENTER_LONG and not self.position:
                 stop, take = initial_stops(f.close, f.atr, self.p_params)
-                self.state = PositionState(
-                    is_open=True, entry_price=f.close,
-                    stop_price=stop, take_price=take, bars_held=0,
+                size = position_size(
+                    self.broker.getcash(), f.close, stop,
+                    risk_fraction=risk_fraction, lot_size=lot_size,
                 )
-                self.buy()
+                if size > 0:
+                    self.state = PositionState(
+                        is_open=True, entry_price=f.close,
+                        stop_price=stop, take_price=take, bars_held=0,
+                    )
+                    self.buy(size=size)
             elif action == Action.EXIT and self.position:
                 self.close()
                 self.state = PositionState()

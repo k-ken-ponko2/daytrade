@@ -179,18 +179,24 @@ daytrade/
 ├── requirements.txt         # 依存（重い依存はコメントで段階導入）
 ├── .env.example             # J-Quants 認証情報のひな型（.env にコピーして使う）
 ├── scripts/
-│   └── fetch_jquants_minimal.py   # フェーズ1：J-Quants 接続確認の最小コード
+│   ├── fetch_jquants_minimal.py   # フェーズ1：J-Quants 接続確認の最小コード
+│   ├── run_demo.py                # end-to-end デモ（データ→損益→チャート）
+│   └── compare_engines.py         # 二重検証：基準実装 vs Backtrader
 ├── src/daytrade/
 │   ├── core/                # 共通ロジック層（エンジン非依存・単一の真実）
 │   │   ├── types.py         #   Action / Features / PositionState / StrategyParams
 │   │   ├── indicators.py    #   指標計算（SMA / ATR / VWAP / 出来高平均、日次リセット）
+│   │   ├── risk.py          #   株数計算（損切り幅からの逆算＋単元株丸め）
 │   │   └── signals.py       #   売買判定 decide() ＝ 単一の真実 ＋ 基準実装 generate_signals()
+│   ├── backtest/            # 基準バックテスト層
+│   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（基準値）
+│   │   └── sample_data.py   #   プラン不要の合成分足データ（デモ・テスト用）
 │   ├── data/
 │   │   └── jquants.py       # J-Quants API クライアント（過去検証専用）
 │   └── adapters/            # 各エンジンへの接続部分（判定は core に委譲）
 │       ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
 │       └── nautilus_adapter.py      # NautilusTrader 用（骨格）
-└── tests/                   # core 層のユニットテスト（pytest）
+└── tests/                   # core / backtest 層のユニットテスト（pytest）
 ```
 
 設計の核（README 5章）：売買判定は `core/signals.py` の `decide()` に集約し、
@@ -214,13 +220,38 @@ PYTHONPATH=src python scripts/fetch_jquants_minimal.py 7203 --from 2024-01-01 --
 
 Free プランはデータが12週間遅延するため、取得できる最新日付が数ヶ月前になるのは正常。
 
+### end-to-end デモ（プラン不要）
+
+合成分足データで「データ→指標→売買判定→損益→可視化」まで一気通貫で動かす。
+有料の分足アドオンは不要。`--jquants` を付けると free の日足でも実行できる。
+
+```bash
+pip install matplotlib                                  # チャート保存に必要
+PYTHONPATH=src python scripts/run_demo.py --out demo.png
+PYTHONPATH=src python scripts/run_demo.py --jquants 7203 --from 2024-01-01 --to 2024-03-31
+```
+
+手数料・スリッページ込みの損益・勝率・最大ドローダウンを表示し、エントリー/決済と
+エクイティ曲線をチャート化する。合成データは配線確認用で、優位性の主張ではない（8章）。
+
+### 二重検証（フェーズ4の核）
+
+同一データ・同一ロジックを基準実装と Backtrader で回し、最終評価額のズレが許容範囲かを判定する。
+「完全一致はしない前提」（5章）で、Backtrader は cheat-on-close により終値約定へ寄せている。
+
+```bash
+pip install backtrader
+PYTHONPATH=src python scripts/compare_engines.py --days 20 --tol 0.02
+```
+
 ### テスト
 
 ```bash
-pytest          # 共通ロジック層（指標・売買判定）のユニットテスト
+pytest          # core（指標・売買判定・株数計算）＋ backtest 層のユニットテスト
 ```
 
 ### 段階導入のメモ
 
 - 指標：いまは pandas/numpy 実装。`requirements.txt` の `pandas-ta` / `TA-Lib` を有効化すれば差し替え可能（入出力の形は不変）。
-- エンジン：`backtrader` / `nautilus_trader` は重い依存のためコメントアウト中。フェーズ4で有効化する。
+- 分足の実データ：free では日足のみ。デイトレ用の分足は Standard＋分足アドオン（5章）。本格検証時のみ契約し、終わったら解約する方針。
+- エンジン：`backtrader` はデモ・二重検証で使用（`pip install backtrader`）。`nautilus_trader` はフェーズ4で骨格を肉付けする。
