@@ -164,4 +164,63 @@ Backtraderアダプタ      NautilusTraderアダプタ
 
 - [ ] J-Quants に Free 登録（接続確認の準備）
 - [ ] 証券口座（三菱UFJ eスマート証券）開設・信用口座申込（開設に日数がかかるため早めに）
-- [ ] J-Quants からデータ取得する最小コードの作成
+- [x] J-Quants からデータ取得する最小コードの作成（`scripts/fetch_jquants_minimal.py`）
+
+---
+
+## 11. リポジトリ構成と動かし方
+
+### ディレクトリ
+
+```
+daytrade/
+├── README.md                # 本ドキュメント
+├── pyproject.toml           # パッケージ設定 / pytest 設定
+├── requirements.txt         # 依存（重い依存はコメントで段階導入）
+├── .env.example             # J-Quants 認証情報のひな型（.env にコピーして使う）
+├── scripts/
+│   └── fetch_jquants_minimal.py   # フェーズ1：J-Quants 接続確認の最小コード
+├── src/daytrade/
+│   ├── core/                # 共通ロジック層（エンジン非依存・単一の真実）
+│   │   ├── types.py         #   Action / Features / PositionState / StrategyParams
+│   │   ├── indicators.py    #   指標計算（SMA / ATR / VWAP / 出来高平均、日次リセット）
+│   │   └── signals.py       #   売買判定 decide() ＝ 単一の真実 ＋ 基準実装 generate_signals()
+│   ├── data/
+│   │   └── jquants.py       # J-Quants API クライアント（過去検証専用）
+│   └── adapters/            # 各エンジンへの接続部分（判定は core に委譲）
+│       ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
+│       └── nautilus_adapter.py      # NautilusTrader 用（骨格）
+└── tests/                   # core 層のユニットテスト（pytest）
+```
+
+設計の核（README 5章）：売買判定は `core/signals.py` の `decide()` に集約し、
+Backtrader / NautilusTrader アダプタはそれを呼ぶだけにする。
+ロジック修正は1箇所で済み、両エンジンの差分が「エンジンの差」だけに絞れる。
+
+### セットアップ
+
+```bash
+python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env        # JQUANTS_EMAIL / JQUANTS_PASSWORD を記入
+```
+
+### フェーズ1：J-Quants 接続確認
+
+```bash
+PYTHONPATH=src python scripts/fetch_jquants_minimal.py 7203
+PYTHONPATH=src python scripts/fetch_jquants_minimal.py 7203 --from 2024-01-01 --to 2024-03-31
+```
+
+Free プランはデータが12週間遅延するため、取得できる最新日付が数ヶ月前になるのは正常。
+
+### テスト
+
+```bash
+pytest          # 共通ロジック層（指標・売買判定）のユニットテスト
+```
+
+### 段階導入のメモ
+
+- 指標：いまは pandas/numpy 実装。`requirements.txt` の `pandas-ta` / `TA-Lib` を有効化すれば差し替え可能（入出力の形は不変）。
+- エンジン：`backtrader` / `nautilus_trader` は重い依存のためコメントアウト中。フェーズ4で有効化する。
