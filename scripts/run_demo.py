@@ -24,18 +24,15 @@ from daytrade.core.types import StrategyParams
 
 
 def _load_jquants_daily(code: str, from_date: str | None, to_date: str | None) -> pd.DataFrame:
-    """J-Quants free プランの日足を OHLCV(DataFrame) に整形して返す。"""
+    """J-Quants free プランの日足を取得し、調整後 OHLCV に整形して返す（キャッシュ利用）。"""
     from daytrade.data.jquants import JQuantsClient
+    from daytrade.data.loader import DataStore, to_ohlcv
 
     client = JQuantsClient.from_env()
-    raw = client.get_daily_quotes(code=code, from_date=from_date, to_date=to_date)
+    raw = DataStore().get_daily(client, code, from_date=from_date, to_date=to_date)
     if raw.empty:
         return raw
-    df = raw.rename(columns={
-        "Open": "open", "High": "high", "Low": "low",
-        "Close": "close", "Volume": "volume",
-    }).set_index("Date")[["open", "high", "low", "close", "volume"]]
-    return df.dropna()
+    return to_ohlcv(raw, adjusted=True)
 
 
 def _print_metrics(metrics: dict, n_bars: int) -> None:

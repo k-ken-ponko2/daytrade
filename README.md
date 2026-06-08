@@ -180,6 +180,7 @@ daytrade/
 ├── .env.example             # J-Quants 認証情報のひな型（.env にコピーして使う）
 ├── scripts/
 │   ├── fetch_jquants_minimal.py   # フェーズ1：J-Quants 接続確認の最小コード
+│   ├── fetch_jquants_data.py      # データ取得パイプライン（fetch/screen/check）
 │   ├── run_demo.py                # end-to-end デモ（データ→損益→チャート）
 │   └── compare_engines.py         # 二重検証：基準実装 vs Backtrader
 ├── src/daytrade/
@@ -191,8 +192,11 @@ daytrade/
 │   ├── backtest/            # 基準バックテスト層
 │   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（基準値）
 │   │   └── sample_data.py   #   プラン不要の合成分足データ（デモ・テスト用）
-│   ├── data/
-│   │   └── jquants.py       # J-Quants API クライアント（過去検証専用）
+│   ├── data/                # データ取得層（過去検証専用）
+│   │   ├── jquants.py       #   J-Quants API クライアント（認証/日足/カレンダー/銘柄）
+│   │   ├── loader.py        #   OHLCV 整形（調整後/生）＋ローカルキャッシュ DataStore
+│   │   ├── calendar.py      #   取引カレンダー（営業日・欠損日チェック）
+│   │   └── screening.py     #   売買代金による流動性スクリーニング
 │   └── adapters/            # 各エンジンへの接続部分（判定は core に委譲）
 │       ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
 │       └── nautilus_adapter.py      # NautilusTrader 用（骨格）
@@ -219,6 +223,27 @@ PYTHONPATH=src python scripts/fetch_jquants_minimal.py 7203 --from 2024-01-01 --
 ```
 
 Free プランはデータが12週間遅延するため、取得できる最新日付が数ヶ月前になるのは正常。
+
+### データ取得パイプライン（free 日足）
+
+日足の取得 → ローカルキャッシュ（parquet／無ければCSV） → バックテスト用 OHLCV 整形までを束ねる。
+キャッシュには J-Quants の生レスポンスを保存し、調整後／生の選択は読み出し時に行う（再取得不要）。
+
+```bash
+# 1銘柄を取得・キャッシュして OHLCV（既定=調整後）を表示。--raw で生の価格
+PYTHONPATH=src python scripts/fetch_jquants_data.py fetch 7203 --from 2024-01-01 --to 2024-03-31
+
+# 売買代金（流動性）で上位銘柄をスクリーニング（指定営業日の平均）
+PYTHONPATH=src python scripts/fetch_jquants_data.py screen --dates 2024-01-15 2024-01-16 --top 30
+
+# キャッシュ済み日足の欠損営業日チェック（取得漏れ検出）
+PYTHONPATH=src python scripts/fetch_jquants_data.py check 7203 --from 2024-01-01 --to 2024-03-31
+```
+
+**価格種別（調整後 vs 生）**：株式分割等で生の株価は分割日に不連続になり、指標・損益計算が壊れる。
+これを遡って補正・連続にしたのが調整後価格で、**バックテストは調整後（既定）が正しい**。
+「当時の実際の値段・単元あたり必要資金」を見たいときだけ `--raw`（`adjusted=False`）を使う。
+流動性スクリーニングの売買代金は、その日の実際の代金 `TurnoverValue`（生）で評価する。
 
 ### end-to-end デモ（プラン不要）
 

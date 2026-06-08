@@ -19,8 +19,9 @@ ENV/
 .env
 *.local
 
-# Data (検証用データは大きいのでコミットしない)
-data/
+# Data cache (検証用データは大きいのでコミットしない)
+# ルート直下のキャッシュのみを対象にする（src 配下の data パッケージは除外しない）
+/data/
 *.csv
 *.parquet
 *.feather

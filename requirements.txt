@@ -4,6 +4,9 @@ numpy>=1.24
 requests>=2.31
 python-dotenv>=1.0
 
+# --- データキャッシュ（任意） ---
+pyarrow>=14.0   # parquet キャッシュ用。無ければ DataStore は自動で CSV にフォールバック
+
 # --- 可視化 ---
 matplotlib>=3.7
 # plotly>=5.18  # 必要になったら有効化
