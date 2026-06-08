@@ -182,7 +182,8 @@ daytrade/
 │   ├── fetch_jquants_minimal.py   # フェーズ1：J-Quants 接続確認の最小コード
 │   ├── fetch_jquants_data.py      # データ取得パイプライン（fetch/screen/check）
 │   ├── run_demo.py                # end-to-end デモ（データ→損益→チャート）
-│   └── compare_engines.py         # 二重検証：基準実装 vs Backtrader
+│   ├── compare_engines.py         # 二重検証：基準実装 vs Backtrader
+│   └── walk_forward.py            # ウォークフォワード＋局面別ロバストネス
 ├── src/daytrade/
 │   ├── core/                # 共通ロジック層（エンジン非依存・単一の真実）
 │   │   ├── types.py         #   Action / Features / PositionState / StrategyParams
@@ -191,7 +192,8 @@ daytrade/
 │   │   └── signals.py       #   売買判定 decide() ＝ 単一の真実 ＋ 基準実装 generate_signals()
 │   ├── backtest/            # 基準バックテスト層
 │   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（基準値）
-│   │   └── sample_data.py   #   プラン不要の合成分足データ（デモ・テスト用）
+│   │   ├── walkforward.py   #   ウォークフォワード検証（過剰最適化の検出）
+│   │   └── sample_data.py   #   プラン不要の合成分足データ（局面別・デモ/テスト用）
 │   ├── data/                # データ取得層（過去検証専用）
 │   │   ├── jquants.py       #   J-Quants API クライアント（認証/日足/カレンダー/銘柄）
 │   │   ├── loader.py        #   OHLCV 整形（調整後/生）＋ローカルキャッシュ DataStore
@@ -269,10 +271,24 @@ pip install backtrader
 PYTHONPATH=src python scripts/compare_engines.py --days 20 --tol 0.02
 ```
 
+### ウォークフォワード検証（過剰最適化の検出）
+
+パラメータを過去区間（イン・サンプル/IS）で最適化し、その先の未知区間（アウト・オブ・
+サンプル/OOS）で評価する。**ISは良いのにOOSで崩れる＝過剰最適化**（README 8章の「最大の罠」）。
+区間をずらして繰り返し、IS-OOSのギャップと相場局面別の挙動を見る。
+
+```bash
+PYTHONPATH=src python scripts/walk_forward.py --all-regimes --days 40 --train 10 --test 5
+```
+
+出力は各区間の IS%／OOS%／OOS取引数／勝率と、局面別（mixed/trend_up/trend_down/chop）の要約。
+**合成データには本来優位性がないため、OOS平均が0以下になり「採用しない」と出るのが正しい挙動**
+（検証器が偽の優位性を作らないことの確認）。実データに差し替える際は df を `to_ohlcv()` の出力に置換する。
+
 ### テスト
 
 ```bash
-pytest          # core（指標・売買判定・株数計算）＋ backtest 層のユニットテスト
+pytest          # core（指標・売買判定・株数計算）＋ backtest（エンジン・WF）＋ data 層
 ```
 
 ### 段階導入のメモ

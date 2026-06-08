@@ -7,5 +7,22 @@
 """
 
 from daytrade.backtest.engine import BacktestConfig, BacktestResult, Trade, run_backtest
+from daytrade.backtest.walkforward import (
+    WalkForwardReport,
+    WindowResult,
+    param_grid,
+    rolling_windows,
+    run_walk_forward,
+)
 
-__all__ = ["BacktestConfig", "BacktestResult", "Trade", "run_backtest"]
+__all__ = [
+    "BacktestConfig",
+    "BacktestResult",
+    "Trade",
+    "WalkForwardReport",
+    "WindowResult",
+    "param_grid",
+    "rolling_windows",
+    "run_backtest",
+    "run_walk_forward",
+]
