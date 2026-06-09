@@ -51,6 +51,15 @@ def _print_metrics(metrics: dict, n_bars: int) -> None:
     pf = metrics["profit_factor"]
     print(f"プロフィットファクタ: {pf:>10.2f}" if pf != float("inf") else "プロフィットファクタ:        inf")
     print(f"最大ドローダウン  : {metrics['max_drawdown']*100:>11.2f} %")
+
+    # 日利 vs 目標（README 0章：目標 日利2.5%）
+    tgt = metrics.get("daily_target", 0.025)
+    print(f"\n--- 日利（目標 {tgt*100:.1f}%）---")
+    print(f"営業日数          : {metrics.get('num_days', 0):>12d}")
+    print(f"実効日利(複利)    : {metrics.get('geom_daily_return', 0)*100:>11.2f} %")
+    print(f"平均日利          : {metrics.get('avg_daily_return', 0)*100:>11.2f} %")
+    print(f"目標達成日の割合  : {metrics.get('daily_target_hit_rate', 0)*100:>11.1f} %")
+    print(f"目標との差(平均)  : {metrics.get('daily_target_gap', 0)*100:>11.2f} pt")
     print("\n※ 合成データでの配線確認用。優位性の検証ではない（README 8章）。")
 
 

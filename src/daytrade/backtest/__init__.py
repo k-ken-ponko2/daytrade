@@ -6,7 +6,13 @@
 基準実装の結果を Backtrader / NautilusTrader と突き合わせて二重検証する（README 5章）。
 """
 
-from daytrade.backtest.engine import BacktestConfig, BacktestResult, Trade, run_backtest
+from daytrade.backtest.engine import (
+    BacktestConfig,
+    BacktestResult,
+    Trade,
+    daily_returns,
+    run_backtest,
+)
 from daytrade.backtest.walkforward import (
     WalkForwardReport,
     WindowResult,
@@ -21,6 +27,7 @@ __all__ = [
     "Trade",
     "WalkForwardReport",
     "WindowResult",
+    "daily_returns",
     "param_grid",
     "rolling_windows",
     "run_backtest",

@@ -41,6 +41,7 @@ class BacktestConfig:
     risk_fraction: float = 0.05       # 1トレード最大損失（資金比。README: 5〜7%）
     lot_size: int = 100               # 単元株
     retreat_drawdown: float | None = None  # 撤退ライン（README 7章）。0.5 で半減撤退。None で無効
+    daily_return_target: float = 0.025     # 日利の目標（ベンチマーク・計測用。README 0章）
 
 
 @dataclass
@@ -80,6 +81,18 @@ def _exit_reason(f, position: PositionState, params: StrategyParams, retreated: 
     return "signal"
 
 
+def daily_returns(equity: pd.Series) -> pd.Series:
+    """エクイティ曲線から日次リターン（立会日ごとの引け→引けの変化率）を求める。
+
+    分足の評価額を立会日ごとの最終値に畳み、その前日比をとる。デイトレの「日利」を
+    実測する基準。インデックスが時刻でない場合は空を返す。
+    """
+    if equity.empty or not isinstance(equity.index, pd.DatetimeIndex):
+        return pd.Series(dtype=float)
+    daily_close = equity.groupby(equity.index.normalize()).last()
+    return daily_close.pct_change().dropna()
+
+
 def _compute_metrics(trades: list[Trade], equity: pd.Series, config: BacktestConfig) -> dict:
     if equity.empty:
         return {}
@@ -98,6 +111,13 @@ def _compute_metrics(trades: list[Trade], equity: pd.Series, config: BacktestCon
     gross_loss = float(-losses.sum())
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float("inf")
 
+    # --- 日利（目標 2.5% に対する実測。README 0章のベンチマーク） ---
+    dr = daily_returns(equity)
+    # 全期間を1日あたりの幾何平均（複利）に均した実効日利
+    n_days = max(len(dr) + 1, 1)  # pct_change で1日減るぶんを戻す
+    geom_daily = (final_equity / config.initial_cash) ** (1.0 / n_days) - 1.0 if n_days else 0.0
+    target = config.daily_return_target
+
     return {
         "initial_cash": config.initial_cash,
         "final_equity": final_equity,
@@ -108,6 +128,14 @@ def _compute_metrics(trades: list[Trade], equity: pd.Series, config: BacktestCon
         "avg_loss": float(losses.mean()) if len(losses) else 0.0,
         "profit_factor": profit_factor,
         "max_drawdown": max_drawdown,
+        # 日利メトリクス
+        "num_days": int(len(dr) + 1) if len(dr) else (1 if not equity.empty else 0),
+        "avg_daily_return": float(dr.mean()) if len(dr) else 0.0,
+        "median_daily_return": float(dr.median()) if len(dr) else 0.0,
+        "geom_daily_return": float(geom_daily),
+        "daily_target": target,
+        "daily_target_hit_rate": float((dr >= target).mean()) if len(dr) else 0.0,
+        "daily_target_gap": float((dr.mean() if len(dr) else 0.0) - target),
     }
 
 
