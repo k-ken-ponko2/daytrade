@@ -111,9 +111,11 @@ def main(argv: list[str] | None = None) -> int:
         df = make_intraday_ohlcv(n_days=args.days)
         # デモが視覚的に分かりやすいよう、短めのMAで取引頻度を上げている
         # （優位性の主張ではなく配線確認用。実検証では実データで再調整する）
+        # トレーリング・段階利確も有効化して決済ロジックの拡張を見せる（README 6・7章）
         params = StrategyParams(
             fast_period=3, slow_period=10, volume_surge_mult=1.3,
             force_close_bar=55, max_hold_bars=20,
+            trailing_stop_atr_mult=1.5, scale_out_atr_mult=1.0, scale_out_fraction=0.5,
         )
 
     result = run_backtest(df, params, BacktestConfig())

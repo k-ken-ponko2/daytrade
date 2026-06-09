@@ -16,8 +16,10 @@ backtrader をインストール（requirements.txt のコメントを外す）�
 
 from __future__ import annotations
 
+import math
+
 from daytrade.core.risk import position_size
-from daytrade.core.signals import decide, initial_stops
+from daytrade.core.signals import decide, open_position, update_trailing_stop
 from daytrade.core.types import Action, Features, PositionState, StrategyParams
 
 
@@ -27,6 +29,8 @@ def make_strategy(params: StrategyParams, *, risk_fraction: float = 0.05, lot_si
     backtrader を遅延 import するため、関数内で定義している。
     指標は backtrader 組み込みの indicator を使い、Features に詰めて decide() に渡す。
     株数は基準実装と同じ core.risk.position_size で決める（二重検証のズレを抑えるため）。
+    トレーリング・段階利確も基準実装と同じ core 関数（open_position / update_trailing_stop）
+    を使い、両エンジンの差を「エンジンの差」だけに絞る。
     """
     import backtrader as bt
 
@@ -84,20 +88,29 @@ def make_strategy(params: StrategyParams, *, risk_fraction: float = 0.05, lot_si
             self._update_session()
             self.state.is_open = bool(self.position)
             f = self._features()
+
+            # トレーリングストップの状態更新（基準実装と同じ core 関数）
+            if self.state.is_open:
+                update_trailing_stop(self.state, f, self.p_params)
+
             action = decide(f, self.state, self.p_params)
 
             if action == Action.ENTER_LONG and not self.position:
-                stop, take = initial_stops(f.close, f.atr, self.p_params)
+                prospective = open_position(f.close, f.atr, self.p_params)
                 size = position_size(
-                    self.broker.getcash(), f.close, stop,
+                    self.broker.getcash(), f.close, prospective.stop_price,
                     risk_fraction=risk_fraction, lot_size=lot_size,
                 )
                 if size > 0:
-                    self.state = PositionState(
-                        is_open=True, entry_price=f.close,
-                        stop_price=stop, take_price=take, bars_held=0,
-                    )
+                    self.state = prospective
                     self.buy(size=size)
+            elif action == Action.SCALE_OUT and self.position:
+                held = self.position.size
+                sc = int(math.floor(held * self.p_params.scale_out_fraction / lot_size) * lot_size)
+                if 0 < sc < held:
+                    self.sell(size=sc)
+                self.state.scaled_out = True
+                self.state.bars_held += 1
             elif action == Action.EXIT and self.position:
                 self.close()
                 self.state = PositionState()

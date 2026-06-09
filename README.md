@@ -188,10 +188,10 @@ daytrade/
 │   ├── core/                # 共通ロジック層（エンジン非依存・単一の真実）
 │   │   ├── types.py         #   Action / Features / PositionState / StrategyParams
 │   │   ├── indicators.py    #   指標計算（SMA / ATR / VWAP / 出来高平均、日次リセット）
-│   │   ├── risk.py          #   株数計算（損切り幅からの逆算＋単元株丸め）
-│   │   └── signals.py       #   売買判定 decide() ＝ 単一の真実 ＋ 基準実装 generate_signals()
+│   │   ├── risk.py          #   株数計算（損切り逆算＋単元株丸め）＋撤退ライン判定
+│   │   └── signals.py       #   decide()＝単一の真実（トレーリング/段階利確含む）＋基準実装
 │   ├── backtest/            # 基準バックテスト層
-│   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（基準値）
+│   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（撤退ライン対応）
 │   │   ├── walkforward.py   #   ウォークフォワード検証（過剰最適化の検出）
 │   │   └── sample_data.py   #   プラン不要の合成分足データ（局面別・デモ/テスト用）
 │   ├── data/                # データ取得層（過去検証専用）
@@ -199,15 +199,33 @@ daytrade/
 │   │   ├── loader.py        #   OHLCV 整形（調整後/生）＋ローカルキャッシュ DataStore
 │   │   ├── calendar.py      #   取引カレンダー（営業日・欠損日チェック）
 │   │   └── screening.py     #   売買代金による流動性スクリーニング
-│   └── adapters/            # 各エンジンへの接続部分（判定は core に委譲）
-│       ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
-│       └── nautilus_adapter.py      # NautilusTrader 用（骨格）
-└── tests/                   # core / backtest 層のユニットテスト（pytest）
+│   ├── adapters/            # 各バックテストエンジンへの接続部分（判定は core に委譲）
+│   │   ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
+│   │   └── nautilus_adapter.py      # NautilusTrader 用（FeatureBuilder＋Strategy）
+│   └── live/                # ライブ実行層（本番の手足）
+│       └── kabu.py          #   kabuステーションAPI クライアント（発注/板/余力、dry_run既定）
+└── tests/                   # core / backtest / data / live 層のユニットテスト（pytest）
 ```
 
 設計の核（README 5章）：売買判定は `core/signals.py` の `decide()` に集約し、
 Backtrader / NautilusTrader アダプタはそれを呼ぶだけにする。
-ロジック修正は1箇所で済み、両エンジンの差分が「エンジンの差」だけに絞れる。
+ロジック修正は1箇所で済み、各エンジンの差分が「エンジンの差」だけに絞れる。
+
+### 決済ロジック（README 6・7章）
+
+`decide()` は損切りに加え、以下を `StrategyParams` で切替できる（None で無効＝従来動作）:
+- **トレーリングストップ** `trailing_stop_atr_mult`：高値からこの ATR 倍ぶん下げたら手仕舞い（利を伸ばす）
+- **段階的利確** `scale_out_atr_mult` / `scale_out_fraction`：第1目標で一部利確して原資回収、残りを伸ばす
+- **撤退ライン** `BacktestConfig.retreat_drawdown`：評価額が初期資金から指定ぶん減ったら全手仕舞いして以後停止（0.5＝半減で撤退）
+
+トレーリングと段階利確のロジックも core 関数（`open_position` / `update_trailing_stop`）に集約し、
+Backtrader / NautilusTrader アダプタが同じものを呼ぶ。
+
+### ライブ実行層（kabuステーションAPI）
+
+本番の発注・板取得は `live/kabu.py`（Windows専用アプリ起動が前提・ローカル REST）。安全側に倒し、
+**既定は検証ポート(18081)・発注は `dry_run=True`**。本番発注は明示的に `is_test=False` / `dry_run=False`
+を指定したときだけ。認証情報は `.env`（`KABU_API_PASSWORD` / `KABU_TRADE_PASSWORD`）から読む。
 
 ### セットアップ
 
@@ -288,11 +306,12 @@ PYTHONPATH=src python scripts/walk_forward.py --all-regimes --days 40 --train 10
 ### テスト
 
 ```bash
-pytest          # core（指標・売買判定・株数計算）＋ backtest（エンジン・WF）＋ data 層
+pytest          # core / backtest / data / live 全層（Nautilus は未導入なら自動スキップ）
 ```
 
 ### 段階導入のメモ
 
 - 指標：いまは pandas/numpy 実装。`requirements.txt` の `pandas-ta` / `TA-Lib` を有効化すれば差し替え可能（入出力の形は不変）。
 - 分足の実データ：free では日足のみ。デイトレ用の分足は Standard＋分足アドオン（5章）。本格検証時のみ契約し、終わったら解約する方針。
-- エンジン：`backtrader` はデモ・二重検証で使用（`pip install backtrader`）。`nautilus_trader` はフェーズ4で骨格を肉付けする。
+- エンジン：`backtrader` はデモ・二重検証で使用（`pip install backtrader`）。`nautilus_trader` はアダプタ実装済み（重い依存のため任意導入。未導入時は関連テストを自動スキップ）。
+- ライブ：`live/kabu.py` は Windows のkabuステーションアプリ起動が前提。実発注は不可逆なので検証ポート＋dry_run から。

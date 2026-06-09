@@ -14,14 +14,20 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from daytrade.core.indicators import compute_indicators
-from daytrade.core.risk import position_size
-from daytrade.core.signals import _row_to_features, decide, initial_stops
+from daytrade.core.risk import position_size, retreat_triggered
+from daytrade.core.signals import (
+    _row_to_features,
+    decide,
+    open_position,
+    update_trailing_stop,
+)
 from daytrade.core.types import Action, PositionState, StrategyParams
 
 
@@ -34,6 +40,7 @@ class BacktestConfig:
     slippage_rate: float = 0.0002     # 片道スリッページ（価格比）
     risk_fraction: float = 0.05       # 1トレード最大損失（資金比。README: 5〜7%）
     lot_size: int = 100               # 単元株
+    retreat_drawdown: float | None = None  # 撤退ライン（README 7章）。0.5 で半減撤退。None で無効
 
 
 @dataclass
@@ -58,8 +65,10 @@ class BacktestResult:
     metrics: dict = field(default_factory=dict)
 
 
-def _exit_reason(f, position: PositionState, params: StrategyParams) -> str:
+def _exit_reason(f, position: PositionState, params: StrategyParams, retreated: bool = False) -> str:
     """EXIT の理由を decide() と同じ優先順で判定する（記録用）。"""
+    if retreated:
+        return "retreat"
     if f.low <= position.stop_price:
         return "stop_loss"
     if params.force_close_bar is not None and f.bar_index >= params.force_close_bar:
@@ -115,52 +124,74 @@ def run_backtest(
     position = PositionState()
     cash = config.initial_cash       # 余力
     shares_held = 0
-    entry_price_eff = 0.0
     entry_time: pd.Timestamp | None = None
+    halted = False                   # 撤退ライン発火後はラッチ（以後エントリーしない）
 
     trades: list[Trade] = []
     equity_points: list[float] = []
     actions: list[str] = []
     positions: list[int] = []
 
+    def _close(qty: int, exit_price_eff: float, ts, reason: str) -> None:
+        """qty 株を約定価格 exit_price_eff で手仕舞い、現金と Trade を更新する。"""
+        nonlocal cash
+        notional = exit_price_eff * qty
+        commission = notional * config.commission_rate
+        cash += notional - commission
+        entry_notional = position.entry_price * qty
+        pnl = (exit_price_eff - position.entry_price) * qty \
+            - commission - entry_notional * config.commission_rate
+        trades.append(Trade(
+            entry_time=entry_time, entry_price=position.entry_price,
+            exit_time=ts, exit_price=exit_price_eff, shares=qty,
+            pnl=pnl, return_pct=pnl / entry_notional if entry_notional else 0.0,
+            exit_reason=reason,
+        ))
+
     for ts, row in enriched.iterrows():
         f = _row_to_features(row)
-        action = decide(f, position, params)
 
-        if action == Action.ENTER_LONG and not position.is_open:
-            stop, take = initial_stops(f.close, f.atr, params)
+        # トレーリングストップの状態更新（保有時のみ）
+        if position.is_open:
+            update_trailing_stop(position, f, params)
+
+        # 撤退ライン（評価額ベース）。一度割ったら以後ラッチして新規を止める
+        equity_now = cash + shares_held * f.close
+        if not halted and retreat_triggered(equity_now, config.initial_cash, config.retreat_drawdown):
+            halted = True
+
+        if halted:
+            action = Action.EXIT if position.is_open else Action.HOLD
+        else:
+            action = decide(f, position, params)
+
+        if action == Action.ENTER_LONG and not position.is_open and not halted:
             entry_price_eff = f.close * (1.0 + config.slippage_rate)
+            prospective = open_position(entry_price_eff, f.atr, params)
             size = position_size(
-                cash, entry_price_eff, stop,
+                cash, entry_price_eff, prospective.stop_price,
                 risk_fraction=config.risk_fraction, lot_size=config.lot_size,
             )
             if size > 0:
                 notional = entry_price_eff * size
-                commission = notional * config.commission_rate
-                cash -= notional + commission
+                cash -= notional + notional * config.commission_rate
                 shares_held = size
                 entry_time = ts
-                position = PositionState(
-                    is_open=True, entry_price=entry_price_eff,
-                    stop_price=stop, take_price=take, bars_held=0,
-                )
+                position = prospective
+
+        elif action == Action.SCALE_OUT and position.is_open:
+            # 段階利確：保有の一部だけを手仕舞い、残りを伸ばす
+            sc = int(math.floor(shares_held * params.scale_out_fraction / config.lot_size)
+                     * config.lot_size)
+            if 0 < sc < shares_held:
+                _close(sc, f.close * (1.0 - config.slippage_rate), ts, "scale_out")
+                shares_held -= sc
+            position.scaled_out = True
+            position.bars_held += 1
 
         elif action == Action.EXIT and position.is_open:
-            reason = _exit_reason(f, position, params)
-            exit_price_eff = f.close * (1.0 - config.slippage_rate)
-            notional = exit_price_eff * shares_held
-            commission = notional * config.commission_rate
-            cash += notional - commission
-
-            entry_notional = position.entry_price * shares_held
-            pnl = (exit_price_eff - position.entry_price) * shares_held \
-                - commission - entry_notional * config.commission_rate
-            trades.append(Trade(
-                entry_time=entry_time, entry_price=position.entry_price,
-                exit_time=ts, exit_price=exit_price_eff, shares=shares_held,
-                pnl=pnl, return_pct=pnl / entry_notional if entry_notional else 0.0,
-                exit_reason=reason,
-            ))
+            reason = _exit_reason(f, position, params, retreated=halted)
+            _close(shares_held, f.close * (1.0 - config.slippage_rate), ts, reason)
             shares_held = 0
             position = PositionState()
 
