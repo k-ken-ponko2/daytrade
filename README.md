@@ -12,9 +12,14 @@
 - **元手**：30万円
 - **目標（年間）**：年間利益100万円（残高130万円 ＝ 約4.3倍）
 - **目標（日次）**：**日利2.5%**をベンチマークとする。
-- **対象市場**：日本株
+- **対象市場**：当初は日本株。ただし**30万円の小資金では米国株（1株単位）を優先検討**（下記）。
 - **手法**：デイトレード／スキャルピングの自動売買
 - **認識**：4.3倍は再現性のある手法では極めて困難。達成より先に「退場しないこと」を最優先に設計する。
+
+> **市場の見直し（最低注文数）**：日本株は単元株100なので、3,000円の銘柄は1単位＝30万円＝**全資金が1銘柄に集中**。
+> 米国株は**1株単位**で、$150の銘柄なら約2.2万円から買え、30万円を**複数銘柄に分散**できる。最低注文数の壁を外せるのが小資金には有利。
+> 中核ロジックは市場非依存なので、`core/markets.py` の **MarketProfile**（`JAPAN` / `US`：最低注文単位・通貨・手数料）を切り替えるだけで対応する。
+> 米国株の実運用はブローカー（IBKR / Alpaca / 国内証券の外国株）が別途必要で、ここは未確定。
 
 > **日利2.5%の含意（正直な試算）**：245営業日で複利すると `1.025^245 ≈ 420倍`（30万→約1.2億/年）。
 > 当初の年4.3倍を日利換算すると約0.6%/日なので、2.5%/日はその約4倍・複利で約100倍の到達点にあたる。
@@ -195,6 +200,7 @@ daytrade/
 │   ├── core/                # 共通ロジック層（エンジン非依存・単一の真実）
 │   │   ├── types.py         #   Action / Features / PositionState / StrategyParams
 │   │   ├── indicators.py    #   指標計算（SMA / ATR / VWAP / 出来高平均、日次リセット）
+│   │   ├── markets.py       #   市場プロファイル（日本株=100株/円・米国株=1株/USD）
 │   │   ├── risk.py          #   株数計算（損切り逆算＋単元株丸め）＋撤退ライン判定
 │   │   └── signals.py       #   decide()＝単一の真実（トレーリング/段階利確含む）＋基準実装
 │   ├── backtest/            # 基準バックテスト層
@@ -202,9 +208,10 @@ daytrade/
 │   │   ├── walkforward.py   #   ウォークフォワード検証（過剰最適化の検出）
 │   │   └── sample_data.py   #   プラン不要の合成分足データ（局面別・デモ/テスト用）
 │   ├── data/                # データ取得層（過去検証専用）
-│   │   ├── jquants.py       #   J-Quants API クライアント（認証/日足/カレンダー/銘柄）
+│   │   ├── jquants.py       #   J-Quants API クライアント（日本株。認証/日足/カレンダー/銘柄）
 │   │   ├── loader.py        #   OHLCV 整形（調整後/生）＋ローカルキャッシュ DataStore
 │   │   ├── calendar.py      #   取引カレンダー（営業日・欠損日チェック）
+│   │   ├── overseas.py      #   米国株データ（Stooq 無料日足＋汎用CSVローダ）
 │   │   └── screening.py     #   売買代金による流動性スクリーニング
 │   ├── adapters/            # 各バックテストエンジンへの接続部分（判定は core に委譲）
 │   │   ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
@@ -280,11 +287,37 @@ PYTHONPATH=src python scripts/fetch_jquants_data.py check 7203 --from 2024-01-01
 ```bash
 pip install matplotlib                                  # チャート保存に必要
 PYTHONPATH=src python scripts/run_demo.py --out demo.png
+PYTHONPATH=src python scripts/run_demo.py --market us   # 米国株プロファイル（1株単位・USD）
 PYTHONPATH=src python scripts/run_demo.py --jquants 7203 --from 2024-01-01 --to 2024-03-31
 ```
 
 手数料・スリッページ込みの損益・勝率・最大ドローダウンを表示し、エントリー/決済と
 エクイティ曲線をチャート化する。合成データは配線確認用で、優位性の主張ではない（8章）。
+
+### 市場プロファイルと海外株（米国株）
+
+中核ロジックは市場非依存。`core/markets.py` の `MarketProfile` で最低注文単位・通貨・手数料を切り替える。
+
+```python
+from daytrade.core.markets import US, JAPAN
+from daytrade.backtest.engine import BacktestConfig
+
+US.min_position_value(150.0)        # 150.0  … 米国株は1株=$150から
+JAPAN.min_position_value(3000.0)    # 300000 … 日本株は単元100株=30万円
+cfg = BacktestConfig.for_market(US, initial_cash=2000.0)   # lot_size=1/USD で同じエンジンを回す
+```
+
+米国株の過去データは無料の Stooq 日足、または任意のCSVから:
+
+```python
+from daytrade.data.overseas import StooqClient, load_ohlcv_csv
+df = StooqClient().get_daily("AAPL")          # 米国株は自動で .us 付与（EOD）
+df = load_ohlcv_csv("aapl.csv")               # 証券会社等からエクスポートしたCSV
+```
+
+手数料は証券会社依存（例：Alpaca/IBKR ≒ 0〜極小、国内証券の外国株 ≒ 約定代金の 0.495%）。
+プリセットは目安なので `for_market(US, ..., commission_rate=0.00495)` のように実料率で上書きする。
+実運用の発注は別途ブローカーAPI（IBKR / Alpaca 等）が必要で未確定（下の「次の一歩」参照）。
 
 ### 二重検証（フェーズ4の核）
 

@@ -43,6 +43,23 @@ class BacktestConfig:
     retreat_drawdown: float | None = None  # 撤退ライン（README 7章）。0.5 で半減撤退。None で無効
     daily_return_target: float = 0.025     # 日利の目標（ベンチマーク・計測用。README 0章）
 
+    @classmethod
+    def for_market(cls, market, *, initial_cash: float, **overrides) -> "BacktestConfig":
+        """市場プロファイル（core.markets.MarketProfile）から執行設定を組み立てる。
+
+        最低注文単位・手数料・スリッページを市場に合わせる。米国株なら lot_size=1 に
+        なるので、小資金でも複数銘柄に分散できる（README 0章）。initial_cash はその市場の
+        通貨建てで渡すこと（米国株なら USD）。個別に上書きしたい項目は overrides で指定。
+        """
+        params = dict(
+            initial_cash=initial_cash,
+            commission_rate=market.commission_rate,
+            slippage_rate=market.slippage_rate,
+            lot_size=market.lot_size,
+        )
+        params.update(overrides)
+        return cls(**params)
+
 
 @dataclass
 class Trade:

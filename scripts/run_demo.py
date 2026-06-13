@@ -20,6 +20,7 @@ import pandas as pd
 
 from daytrade.backtest.engine import BacktestConfig, run_backtest
 from daytrade.backtest.sample_data import make_intraday_ohlcv
+from daytrade.core.markets import get_profile
 from daytrade.core.types import StrategyParams
 
 
@@ -35,19 +36,20 @@ def _load_jquants_daily(code: str, from_date: str | None, to_date: str | None) -
     return to_ohlcv(raw, adjusted=True)
 
 
-def _print_metrics(metrics: dict, n_bars: int) -> None:
+def _print_metrics(metrics: dict, n_bars: int, currency: str = "JPY") -> None:
     if not metrics:
         print("トレードが発生しませんでした（条件が厳しすぎるかデータが短い）。")
         return
+    cur = {"JPY": "円", "USD": "USD"}.get(currency, currency)
     print("\n=== バックテスト結果（手数料・スリッページ込み） ===")
     print(f"バー数            : {n_bars}")
-    print(f"初期資金          : {metrics['initial_cash']:>12,.0f} 円")
-    print(f"最終評価額        : {metrics['final_equity']:>12,.0f} 円")
+    print(f"初期資金          : {metrics['initial_cash']:>12,.0f} {cur}")
+    print(f"最終評価額        : {metrics['final_equity']:>12,.0f} {cur}")
     print(f"トータルリターン  : {metrics['total_return']*100:>11.2f} %")
     print(f"トレード数        : {metrics['num_trades']:>12d}")
     print(f"勝率              : {metrics['win_rate']*100:>11.2f} %")
-    print(f"平均利益          : {metrics['avg_win']:>12,.0f} 円")
-    print(f"平均損失          : {metrics['avg_loss']:>12,.0f} 円")
+    print(f"平均利益          : {metrics['avg_win']:>12,.2f} {cur}")
+    print(f"平均損失          : {metrics['avg_loss']:>12,.2f} {cur}")
     pf = metrics["profit_factor"]
     print(f"プロフィットファクタ: {pf:>10.2f}" if pf != float("inf") else "プロフィットファクタ:        inf")
     print(f"最大ドローダウン  : {metrics['max_drawdown']*100:>11.2f} %")
@@ -100,8 +102,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--from", dest="from_date", default=None, help="開始日 YYYY-MM-DD")
     parser.add_argument("--to", dest="to_date", default=None, help="終了日 YYYY-MM-DD")
     parser.add_argument("--days", type=int, default=20, help="合成データの日数")
+    parser.add_argument("--market", choices=["jp", "us"], default="jp",
+                        help="市場プロファイル（jp=単元株100/円、us=1株単位/USD）")
     parser.add_argument("--out", default=None, help="チャートPNGの保存先（省略時は保存しない）")
     args = parser.parse_args(argv)
+
+    initial_cash = 300_000.0
 
     if args.jquants:
         print(f"J-Quants(free) 日足を取得: code={args.jquants}")
@@ -116,8 +122,13 @@ def main(argv: list[str] | None = None) -> int:
             force_close_bar=None, max_hold_bars=10,
         )
     else:
-        print(f"合成分足データを生成: {args.days} 日分")
-        df = make_intraday_ohlcv(n_days=args.days)
+        # 市場プロファイルで価格帯・資金・最低注文単位を切り替える
+        if args.market == "us":
+            base_price, initial_cash = 150.0, 2000.0   # $150 銘柄・$2,000（≒30万円）
+        else:
+            base_price, initial_cash = 1000.0, 300_000.0
+        print(f"合成分足データを生成: {args.days} 日分 / market={args.market}")
+        df = make_intraday_ohlcv(n_days=args.days, base_price=base_price)
         # デモが視覚的に分かりやすいよう、短めのMAで取引頻度を上げている
         # （優位性の主張ではなく配線確認用。実検証では実データで再調整する）
         # トレーリング・段階利確も有効化して決済ロジックの拡張を見せる（README 6・7章）
@@ -127,8 +138,15 @@ def main(argv: list[str] | None = None) -> int:
             trailing_stop_atr_mult=1.5, scale_out_atr_mult=1.0, scale_out_fraction=0.5,
         )
 
-    result = run_backtest(df, params, BacktestConfig())
-    _print_metrics(result.metrics, len(df))
+    if args.jquants:
+        config = BacktestConfig()  # 日本株（J-Quants）は既定（単元株100・円）
+        currency = "JPY"
+    else:
+        profile = get_profile(args.market)
+        config = BacktestConfig.for_market(profile, initial_cash=initial_cash)
+        currency = profile.currency
+    result = run_backtest(df, params, config)
+    _print_metrics(result.metrics, len(df), currency)
 
     if args.out:
         try:
