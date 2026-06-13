@@ -42,6 +42,7 @@ class BacktestConfig:
     lot_size: int = 100               # 単元株
     retreat_drawdown: float | None = None  # 撤退ライン（README 7章）。0.5 で半減撤退。None で無効
     daily_return_target: float = 0.025     # 日利の目標（ベンチマーク・計測用。README 0章）
+    session_tz: str | None = None          # 立会日の境界に使う取引所TZ（米国株なら America/New_York）
 
     @classmethod
     def for_market(cls, market, *, initial_cash: float, **overrides) -> "BacktestConfig":
@@ -56,6 +57,7 @@ class BacktestConfig:
             commission_rate=market.commission_rate,
             slippage_rate=market.slippage_rate,
             lot_size=market.lot_size,
+            session_tz=market.session_tz,
         )
         params.update(overrides)
         return cls(**params)
@@ -164,7 +166,7 @@ def run_backtest(
     """OHLCV を受け取り、共通ロジックを回して損益とエクイティ曲線を返す。"""
     params = params or StrategyParams()
     config = config or BacktestConfig()
-    enriched = compute_indicators(df, params)
+    enriched = compute_indicators(df, params, session_tz=config.session_tz)
 
     position = PositionState()
     cash = config.initial_cash       # 余力

@@ -30,6 +30,7 @@ class MarketProfile:
     commission_rate: float = 0.0005
     slippage_rate: float = 0.0002
     allow_fractional: bool = False
+    session_tz: str = "Asia/Tokyo"   # 立会日の境界に使う取引所タイムゾーン
 
     def min_position_value(self, price: float) -> float:
         """1単位（最低注文）の必要資金 ＝ 価格 × lot_size。
@@ -49,7 +50,7 @@ class MarketProfile:
 # 日本株：単元株100。三菱UFJ eスマート証券（kabuステーション）想定。
 JAPAN = MarketProfile(
     name="Japan", currency="JPY", lot_size=100,
-    commission_rate=0.0005, slippage_rate=0.0002,
+    commission_rate=0.0005, slippage_rate=0.0002, session_tz="Asia/Tokyo",
 )
 
 # 米国株：1株単位。手数料は証券会社で大きく異なる（例：Alpaca/IBKR ≒ 0〜極小、
@@ -57,6 +58,7 @@ JAPAN = MarketProfile(
 US = MarketProfile(
     name="US", currency="USD", lot_size=1,
     commission_rate=0.0, slippage_rate=0.0005, allow_fractional=False,
+    session_tz="America/New_York",
 )
 
 PROFILES = {"jp": JAPAN, "us": US}

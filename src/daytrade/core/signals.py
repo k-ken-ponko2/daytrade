@@ -159,7 +159,8 @@ def _row_to_features(row: pd.Series) -> Features:
     )
 
 
-def generate_signals(df: pd.DataFrame, params: StrategyParams | None = None) -> pd.DataFrame:
+def generate_signals(df: pd.DataFrame, params: StrategyParams | None = None,
+                     *, session_tz: str | None = None) -> pd.DataFrame:
     """OHLCV の DataFrame を受け取り、バー単位で decide() を回した結果を返す。
 
     これは「共通ロジックを素のループで回した基準実装」。Backtrader / NautilusTrader
@@ -169,7 +170,7 @@ def generate_signals(df: pd.DataFrame, params: StrategyParams | None = None) -> 
     戻り値: 入力にカラム action / position を足した DataFrame。
     """
     params = params or StrategyParams()
-    enriched = compute_indicators(df, params)
+    enriched = compute_indicators(df, params, session_tz=session_tz)
 
     position = PositionState()
     actions: list[str] = []

@@ -39,36 +39,45 @@ def atr(df: pd.DataFrame, period: int) -> pd.Series:
     return true_range.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
-def _session_key(index: pd.DatetimeIndex) -> pd.Index:
-    """日付（立会日）ごとのグループキー。VWAP / 当日高値の日次リセットに使う。"""
+def _session_key(index: pd.DatetimeIndex, tz: str | None = None) -> pd.Index:
+    """立会日ごとのグループキー（VWAP / 当日高値 / バー連番の日次リセット用）。
+
+    tz を指定し、かつ index が tz-aware の場合は、その取引所タイムゾーンに変換してから
+    日付を取る（例：UTC で来る米国株データを America/New_York の取引日で区切る）。
+    index が naive の場合は既に取引所ローカル時刻とみなし、そのまま日付化する。
+    """
+    if tz is not None and index.tz is not None:
+        index = index.tz_convert(tz)
     return pd.Index(index.normalize())
 
 
-def vwap_intraday(df: pd.DataFrame) -> pd.Series:
-    """当日始まりからの出来高加重平均価格（日付ごとに毎朝リセット）。"""
+def vwap_intraday(df: pd.DataFrame, tz: str | None = None) -> pd.Series:
+    """当日始まりからの出来高加重平均価格（立会日ごとに毎朝リセット）。"""
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
-    key = _session_key(df.index)
+    key = _session_key(df.index, tz)
     pv = (typical * df["volume"]).groupby(key).cumsum()
     vol = df["volume"].groupby(key).cumsum()
     return pv / vol.replace(0, np.nan)
 
 
-def day_high_so_far(df: pd.DataFrame) -> pd.Series:
-    """当日寄り付きからその時点までの高値（日付ごとにリセット）。"""
-    key = _session_key(df.index)
+def day_high_so_far(df: pd.DataFrame, tz: str | None = None) -> pd.Series:
+    """当日寄り付きからその時点までの高値（立会日ごとにリセット）。"""
+    key = _session_key(df.index, tz)
     return df["high"].groupby(key).cummax()
 
 
-def bar_index_intraday(df: pd.DataFrame) -> pd.Series:
+def bar_index_intraday(df: pd.DataFrame, tz: str | None = None) -> pd.Series:
     """当日の寄り付きを0としたバー連番。引け前の強制クローズ判定に使う。"""
-    key = _session_key(df.index)
+    key = _session_key(df.index, tz)
     return df.groupby(key).cumcount()
 
 
-def compute_indicators(df: pd.DataFrame, params) -> pd.DataFrame:
+def compute_indicators(df: pd.DataFrame, params, *, session_tz: str | None = None) -> pd.DataFrame:
     """全指標を計算して列を追加した新しい DataFrame を返す。
 
     params は core.types.StrategyParams を想定（期間パラメータのみ参照）。
+    session_tz を渡すと、VWAP/当日高値/バー連番の日次リセットをその取引所TZの取引日で行う
+    （米国株なら "America/New_York"。tz-aware なデータでのみ効く）。
     戻り値の列: sma_fast, sma_slow, prev_sma_fast, prev_sma_slow,
                 atr, vwap, volume_avg, day_high, bar_index
     """
@@ -81,9 +90,9 @@ def compute_indicators(df: pd.DataFrame, params) -> pd.DataFrame:
     out["prev_sma_slow"] = out["sma_slow"].shift(1)
 
     out["atr"] = atr(out, params.atr_period)
-    out["vwap"] = vwap_intraday(out)
+    out["vwap"] = vwap_intraday(out, session_tz)
     out["volume_avg"] = sma(out["volume"], params.volume_avg_period)
-    out["day_high"] = day_high_so_far(out)
-    out["bar_index"] = bar_index_intraday(out)
+    out["day_high"] = day_high_so_far(out, session_tz)
+    out["bar_index"] = bar_index_intraday(out, session_tz)
 
     return out

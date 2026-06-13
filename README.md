@@ -210,7 +210,7 @@ daytrade/
 │   ├── data/                # データ取得層（過去検証専用）
 │   │   ├── jquants.py       #   J-Quants API クライアント（日本株。認証/日足/カレンダー/銘柄）
 │   │   ├── loader.py        #   OHLCV 整形（調整後/生）＋ローカルキャッシュ DataStore
-│   │   ├── calendar.py      #   取引カレンダー（営業日・欠損日チェック）
+│   │   ├── calendar.py      #   取引カレンダー（J-Quants 日本株＋NYSE 米国株。営業日・欠損日）
 │   │   ├── overseas.py      #   米国株データ（Stooq 無料日足＋汎用CSVローダ）
 │   │   └── screening.py     #   売買代金による流動性スクリーニング
 │   ├── adapters/            # 各バックテストエンジンへの接続部分（判定は core に委譲）
