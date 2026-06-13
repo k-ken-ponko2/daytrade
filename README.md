@@ -10,10 +10,22 @@
 ## 0. 目標と前提
 
 - **元手**：30万円
-- **目標**：年間利益100万円（残高130万円 ＝ 約4.3倍）
-- **対象市場**：日本株
+- **目標（年間）**：年間利益100万円（残高130万円 ＝ 約4.3倍）
+- **目標（日次）**：**日利2.5%**をベンチマークとする。
+- **対象市場**：当初は日本株。ただし**30万円の小資金では米国株（1株単位）を優先検討**（下記）。
 - **手法**：デイトレード／スキャルピングの自動売買
 - **認識**：4.3倍は再現性のある手法では極めて困難。達成より先に「退場しないこと」を最優先に設計する。
+
+> **市場の見直し（最低注文数）**：日本株は単元株100なので、3,000円の銘柄は1単位＝30万円＝**全資金が1銘柄に集中**。
+> 米国株は**1株単位**で、$150の銘柄なら約2.2万円から買え、30万円を**複数銘柄に分散**できる。最低注文数の壁を外せるのが小資金には有利。
+> 中核ロジックは市場非依存なので、`core/markets.py` の **MarketProfile**（`JAPAN` / `US`：最低注文単位・通貨・手数料）を切り替えるだけで対応する。
+> 米国株の実運用ブローカーは **Interactive Brokers（IBKR）に確定（暫定）**：日本居住者で開設可・API有・端株可・手数料極小。発注アダプタは未実装。
+
+> **日利2.5%の含意（正直な試算）**：245営業日で複利すると `1.025^245 ≈ 420倍`（30万→約1.2億/年）。
+> 当初の年4.3倍を日利換算すると約0.6%/日なので、2.5%/日はその約4倍・複利で約100倍の到達点にあたる。
+> 桁が外れて高いため、本プロジェクトでは2.5%を**「無理に最適化して合わせる目標」ではなく「実測して差を突きつけるベンチマーク」**として扱う
+> （`BacktestConfig.daily_return_target`＝既定0.025。バックテストが実効日利・目標達成日割合・目標との差を毎回算出）。
+> パラメータを2.5%へ過剰最適化することはしない（8章「過剰最適化＝最大の罠」）。
 
 ---
 
@@ -182,30 +194,52 @@ daytrade/
 │   ├── fetch_jquants_minimal.py   # フェーズ1：J-Quants 接続確認の最小コード
 │   ├── fetch_jquants_data.py      # データ取得パイプライン（fetch/screen/check）
 │   ├── run_demo.py                # end-to-end デモ（データ→損益→チャート）
-│   └── compare_engines.py         # 二重検証：基準実装 vs Backtrader
+│   ├── compare_engines.py         # 二重検証：基準実装 vs Backtrader
+│   └── walk_forward.py            # ウォークフォワード＋局面別ロバストネス
 ├── src/daytrade/
 │   ├── core/                # 共通ロジック層（エンジン非依存・単一の真実）
 │   │   ├── types.py         #   Action / Features / PositionState / StrategyParams
 │   │   ├── indicators.py    #   指標計算（SMA / ATR / VWAP / 出来高平均、日次リセット）
-│   │   ├── risk.py          #   株数計算（損切り幅からの逆算＋単元株丸め）
-│   │   └── signals.py       #   売買判定 decide() ＝ 単一の真実 ＋ 基準実装 generate_signals()
+│   │   ├── markets.py       #   市場プロファイル（日本株=100株/円・米国株=1株/USD）
+│   │   ├── risk.py          #   株数計算（損切り逆算＋単元株丸め）＋撤退ライン判定
+│   │   └── signals.py       #   decide()＝単一の真実（トレーリング/段階利確含む）＋基準実装
 │   ├── backtest/            # 基準バックテスト層
-│   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（基準値）
-│   │   └── sample_data.py   #   プラン不要の合成分足データ（デモ・テスト用）
+│   │   ├── engine.py        #   手数料・スリッページ込みの損益計算（撤退ライン対応）
+│   │   ├── walkforward.py   #   ウォークフォワード検証（過剰最適化の検出）
+│   │   └── sample_data.py   #   プラン不要の合成分足データ（局面別・デモ/テスト用）
 │   ├── data/                # データ取得層（過去検証専用）
-│   │   ├── jquants.py       #   J-Quants API クライアント（認証/日足/カレンダー/銘柄）
+│   │   ├── jquants.py       #   J-Quants API クライアント（日本株。認証/日足/カレンダー/銘柄）
 │   │   ├── loader.py        #   OHLCV 整形（調整後/生）＋ローカルキャッシュ DataStore
-│   │   ├── calendar.py      #   取引カレンダー（営業日・欠損日チェック）
+│   │   ├── calendar.py      #   取引カレンダー（J-Quants 日本株＋NYSE 米国株。営業日・欠損日）
+│   │   ├── overseas.py      #   米国株データ（Stooq 無料日足＋汎用CSVローダ）
 │   │   └── screening.py     #   売買代金による流動性スクリーニング
-│   └── adapters/            # 各エンジンへの接続部分（判定は core に委譲）
-│       ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
-│       └── nautilus_adapter.py      # NautilusTrader 用（骨格）
-└── tests/                   # core / backtest 層のユニットテスト（pytest）
+│   ├── adapters/            # 各バックテストエンジンへの接続部分（判定は core に委譲）
+│   │   ├── backtrader_adapter.py    # Backtrader 用 Strategy ファクトリ
+│   │   └── nautilus_adapter.py      # NautilusTrader 用（FeatureBuilder＋Strategy）
+│   └── live/                # ライブ実行層（本番の手足）
+│       └── kabu.py          #   kabuステーションAPI クライアント（発注/板/余力、dry_run既定）
+└── tests/                   # core / backtest / data / live 層のユニットテスト（pytest）
 ```
 
 設計の核（README 5章）：売買判定は `core/signals.py` の `decide()` に集約し、
 Backtrader / NautilusTrader アダプタはそれを呼ぶだけにする。
-ロジック修正は1箇所で済み、両エンジンの差分が「エンジンの差」だけに絞れる。
+ロジック修正は1箇所で済み、各エンジンの差分が「エンジンの差」だけに絞れる。
+
+### 決済ロジック（README 6・7章）
+
+`decide()` は損切りに加え、以下を `StrategyParams` で切替できる（None で無効＝従来動作）:
+- **トレーリングストップ** `trailing_stop_atr_mult`：高値からこの ATR 倍ぶん下げたら手仕舞い（利を伸ばす）
+- **段階的利確** `scale_out_atr_mult` / `scale_out_fraction`：第1目標で一部利確して原資回収、残りを伸ばす
+- **撤退ライン** `BacktestConfig.retreat_drawdown`：評価額が初期資金から指定ぶん減ったら全手仕舞いして以後停止（0.5＝半減で撤退）
+
+トレーリングと段階利確のロジックも core 関数（`open_position` / `update_trailing_stop`）に集約し、
+Backtrader / NautilusTrader アダプタが同じものを呼ぶ。
+
+### ライブ実行層（kabuステーションAPI）
+
+本番の発注・板取得は `live/kabu.py`（Windows専用アプリ起動が前提・ローカル REST）。安全側に倒し、
+**既定は検証ポート(18081)・発注は `dry_run=True`**。本番発注は明示的に `is_test=False` / `dry_run=False`
+を指定したときだけ。認証情報は `.env`（`KABU_API_PASSWORD` / `KABU_TRADE_PASSWORD`）から読む。
 
 ### セットアップ
 
@@ -253,11 +287,41 @@ PYTHONPATH=src python scripts/fetch_jquants_data.py check 7203 --from 2024-01-01
 ```bash
 pip install matplotlib                                  # チャート保存に必要
 PYTHONPATH=src python scripts/run_demo.py --out demo.png
+PYTHONPATH=src python scripts/run_demo.py --market us   # 米国株プロファイル（1株単位・USD）
 PYTHONPATH=src python scripts/run_demo.py --jquants 7203 --from 2024-01-01 --to 2024-03-31
 ```
 
 手数料・スリッページ込みの損益・勝率・最大ドローダウンを表示し、エントリー/決済と
 エクイティ曲線をチャート化する。合成データは配線確認用で、優位性の主張ではない（8章）。
+
+### 市場プロファイルと海外株（米国株）
+
+中核ロジックは市場非依存。`core/markets.py` の `MarketProfile` で最低注文単位・通貨・手数料を切り替える。
+
+```python
+from daytrade.core.markets import US, JAPAN
+from daytrade.backtest.engine import BacktestConfig
+
+US.min_position_value(150.0)        # 150.0  … 米国株は1株=$150から
+JAPAN.min_position_value(3000.0)    # 300000 … 日本株は単元100株=30万円
+cfg = BacktestConfig.for_market(US, initial_cash=2000.0)   # lot_size=1/USD で同じエンジンを回す
+```
+
+米国株の過去データは無料の Stooq 日足、または任意のCSVから:
+
+```python
+from daytrade.data.overseas import StooqClient, load_ohlcv_csv
+df = StooqClient().get_daily("AAPL")          # 米国株は自動で .us 付与（EOD）
+df = load_ohlcv_csv("aapl.csv")               # 証券会社等からエクスポートしたCSV
+```
+
+手数料は証券会社依存（例：Alpaca/IBKR ≒ 0〜極小、国内証券の外国株 ≒ 約定代金の 0.495%）。
+プリセットは目安なので `for_market(US, ..., commission_rate=0.00495)` のように実料率で上書きする。
+
+**米国株の情報源（データ・ブローカー・規制）の調査と整理は [docs/海外株_情報源.md](docs/海外株_情報源.md) にまとめた。**
+要点：(1) 分足の過去データは **Alpaca が無料で10年分**（J-Quantsの分足アドオン相当が無料で賄える）、
+(2) 発注ブローカーは **IBKR に確定（暫定）**（日本居住者で確実・API有・端株可）、
+(3) **PDTルール（$25,000の壁）は2026-06-04付で撤廃**＝少額デイトレの規制障壁が低下（ただし$2,000未満は無レバ、T+1の資金回転制限あり）。
 
 ### 二重検証（フェーズ4の核）
 
@@ -269,14 +333,29 @@ pip install backtrader
 PYTHONPATH=src python scripts/compare_engines.py --days 20 --tol 0.02
 ```
 
+### ウォークフォワード検証（過剰最適化の検出）
+
+パラメータを過去区間（イン・サンプル/IS）で最適化し、その先の未知区間（アウト・オブ・
+サンプル/OOS）で評価する。**ISは良いのにOOSで崩れる＝過剰最適化**（README 8章の「最大の罠」）。
+区間をずらして繰り返し、IS-OOSのギャップと相場局面別の挙動を見る。
+
+```bash
+PYTHONPATH=src python scripts/walk_forward.py --all-regimes --days 40 --train 10 --test 5
+```
+
+出力は各区間の IS%／OOS%／OOS取引数／勝率と、局面別（mixed/trend_up/trend_down/chop）の要約。
+**合成データには本来優位性がないため、OOS平均が0以下になり「採用しない」と出るのが正しい挙動**
+（検証器が偽の優位性を作らないことの確認）。実データに差し替える際は df を `to_ohlcv()` の出力に置換する。
+
 ### テスト
 
 ```bash
-pytest          # core（指標・売買判定・株数計算）＋ backtest 層のユニットテスト
+pytest          # core / backtest / data / live 全層（Nautilus は未導入なら自動スキップ）
 ```
 
 ### 段階導入のメモ
 
 - 指標：いまは pandas/numpy 実装。`requirements.txt` の `pandas-ta` / `TA-Lib` を有効化すれば差し替え可能（入出力の形は不変）。
 - 分足の実データ：free では日足のみ。デイトレ用の分足は Standard＋分足アドオン（5章）。本格検証時のみ契約し、終わったら解約する方針。
-- エンジン：`backtrader` はデモ・二重検証で使用（`pip install backtrader`）。`nautilus_trader` はフェーズ4で骨格を肉付けする。
+- エンジン：`backtrader` はデモ・二重検証で使用（`pip install backtrader`）。`nautilus_trader` はアダプタ実装済み（重い依存のため任意導入。未導入時は関連テストを自動スキップ）。
+- ライブ：`live/kabu.py` は Windows のkabuステーションアプリ起動が前提。実発注は不可逆なので検証ポート＋dry_run から。

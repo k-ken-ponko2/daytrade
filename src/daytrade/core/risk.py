@@ -52,3 +52,18 @@ def position_size(
     # 単元株に切り下げ
     lots = math.floor(shares / lot_size)
     return max(0, lots * lot_size)
+
+
+def retreat_triggered(
+    equity: float,
+    initial_cash: float,
+    drawdown: float | None,
+) -> bool:
+    """撤退ライン判定（README 7章）。
+
+    評価額が初期資金から drawdown ぶん減ったら True。例: drawdown=0.5 なら半減で撤退。
+    drawdown が None なら無効（常に False）。発火したら一旦すべて手仕舞い、手法を見直す。
+    """
+    if drawdown is None:
+        return False
+    return equity <= initial_cash * (1.0 - drawdown)

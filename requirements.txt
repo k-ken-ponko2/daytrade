@@ -15,9 +15,9 @@ matplotlib>=3.7
 # pandas-ta>=0.3.14b0   # 手軽。導入したら core/indicators.py を差し替え可
 # TA-Lib>=0.4.28        # 高速・網羅。別途Cライブラリのインストールが必要
 
-# --- バックテストエンジン（フェーズ4で導入） ---
-# backtrader>=1.9.78.123
-# nautilus_trader>=1.190.0
+# --- バックテストエンジン（二重/三重検証で導入） ---
+# backtrader>=1.9.78.123    # 二重検証・デモで使用（pip install backtrader）
+# nautilus_trader>=1.190.0  # NautilusTrader アダプタ用（重い依存。導入時のみ）
 
 # --- 開発 ---
 pytest>=7.4
