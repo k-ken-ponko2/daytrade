@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """フェーズ1：J-Quants からデータ取得する最小コード（接続確認用）。
 
-README 9章のフェーズ1に対応。J-Quants Free（0円）で認証と日足取得の疎通を確認する。
+README 9章のフェーズ1に対応。J-Quants Free（0円）で APIキーと日足取得の疎通を確認する。
 Free はデータが12週間遅延するため、取得できる最新日付が数ヶ月前になるのは正常。
 
 事前準備:
     1. https://jpx-jquants.com/ で登録（まずは Free）
-    2. .env.example を .env にコピーし JQUANTS_EMAIL / JQUANTS_PASSWORD を記入
+    2. ダッシュボード「設定 » APIキー」でキーを発行し、.env.example を .env にコピーして
+       JQUANTS_API_KEY を記入（V1 のメール/パスワード方式は 2026-06-01 に廃止）
     3. pip install -r requirements.txt
 
 実行:
@@ -34,9 +35,9 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         client = JQuantsClient.from_env()
-        print("認証中 …")
+        print("APIキーで疎通確認中 …")
         client.authenticate()
-        print("認証成功。")
+        print("疎通OK。")
 
         print(f"日足を取得中: code={args.code} from={args.from_date} to={args.to_date}")
         df = client.get_daily_quotes(
@@ -44,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except JQuantsError as exc:
         print(f"[エラー] {exc}", file=sys.stderr)
-        print("→ .env の認証情報、プランのデータ範囲（Free は12週間遅延）を確認してください。",
+        print("→ .env の JQUANTS_API_KEY、プランのデータ範囲（Free は12週間遅延）を確認してください。",
               file=sys.stderr)
         return 1
 

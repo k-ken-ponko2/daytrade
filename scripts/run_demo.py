@@ -1,45 +1,100 @@
 #!/usr/bin/env python3
 """end-to-end デモ：データ → 指標 → 売買判定 → 損益 → 可視化。
 
-有料の分足アドオンがなくても動くよう、既定では同梱の合成分足データを使う。
-J-Quants free プランで取れる日足を使いたい場合は --jquants CODE を指定する
-（free は12週間遅延・日足のみ。デイトレ用の分足は有料アドオンが必要）。
+データソースを選べる:
+- （指定なし）      合成分足。APIキー不要で配線確認ができる。
+- --alpaca SYMBOL   Alpaca の米国株分足（無料キー）。実データ。
+- --jquants-minute CODE  J-Quants V2 の日本株分足（分足アドオン契約が必要）。実データ。
+- --jquants CODE    J-Quants の日足（参考。デイトレ戦略は日中の動きが前提なので結果に意味は薄い）。
+
+実データの分足は data/intraday/ にキャッシュし、2回目以降は API を呼ばない。
 
 実行例:
-    PYTHONPATH=src python scripts/run_demo.py                 # 合成分足でデモ
-    PYTHONPATH=src python scripts/run_demo.py --out demo.png  # チャート保存
-    PYTHONPATH=src python scripts/run_demo.py --jquants 7203 --from 2024-01-01 --to 2024-03-31
+    PYTHONPATH=src python scripts/run_demo.py --out demo.png
+    PYTHONPATH=src python scripts/run_demo.py --alpaca AAPL --from 2026-09-01 --to 2026-09-30 --out aapl.png
+    PYTHONPATH=src python scripts/run_demo.py --jquants-minute 7203 --from 2026-09-01 --to 2026-09-30 --out 7203.png
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from daytrade.backtest.engine import BacktestConfig, run_backtest
 from daytrade.backtest.sample_data import make_intraday_ohlcv
-from daytrade.core.markets import get_profile
+from daytrade.core.markets import JAPAN, US, MarketProfile, get_profile
 from daytrade.core.types import StrategyParams
 
+INITIAL_CASH = {"JPY": 300_000.0, "USD": 2_000.0}   # 元手30万円（米国株は約$2,000換算）
 
-def _load_jquants_daily(code: str, from_date: str | None, to_date: str | None) -> pd.DataFrame:
-    """J-Quants free プランの日足を取得し、調整後 OHLCV に整形して返す（キャッシュ利用）。"""
+# 実データ分足用の素直な初期パラメータ（最適化していない。README 8章）。
+# force_close_bar は「その日の何本目以降は持ち越さず手仕舞うか」。
+#   日本株: 前場151本＋後場176本 ≒ 327本/日 → 315本目 ≒ 15:10 前後
+#   米国株: 390本/日 → 380本目 ≒ 15:50
+# 約定のない分は欠落するため、閑散銘柄では実際の時刻より遅くなる点に注意。
+_REAL_EXITS = dict(max_hold_bars=30, trailing_stop_atr_mult=1.5,
+                   scale_out_atr_mult=1.0, scale_out_fraction=0.5)
+REAL_PARAMS = {
+    "JPY": StrategyParams(force_close_bar=315, **_REAL_EXITS),
+    "USD": StrategyParams(force_close_bar=380, **_REAL_EXITS),
+}
+
+
+@dataclass
+class Scenario:
+    df: pd.DataFrame
+    params: StrategyParams
+    config: BacktestConfig
+    market: MarketProfile
+    title: str
+    synthetic: bool
+
+
+def _synthetic(args) -> Scenario:
+    market = get_profile(args.market)
+    base_price = 150.0 if market is US else 1000.0
+    print(f"合成分足データを生成: {args.days} 日分 / market={args.market}")
+    df = make_intraday_ohlcv(n_days=args.days, base_price=base_price)
+    # デモが視覚的に分かりやすいよう短めのMAで取引頻度を上げている（配線確認用）
+    params = StrategyParams(
+        fast_period=3, slow_period=10, volume_surge_mult=1.3,
+        force_close_bar=55, max_hold_bars=20,
+        trailing_stop_atr_mult=1.5, scale_out_atr_mult=1.0, scale_out_fraction=0.5,
+    )
+    config = BacktestConfig.for_market(market, initial_cash=INITIAL_CASH[market.currency])
+    return Scenario(df, params, config, market, "synthetic intraday", synthetic=True)
+
+
+def _real_intraday(source: str, symbol: str, args) -> Scenario:
+    from daytrade.data.intraday import load_intraday
+
+    market = US if source == "alpaca" else JAPAN
+    print(f"実データ分足を取得: source={source} symbol={symbol} {args.from_date}〜{args.to_date}")
+    df = load_intraday(source, symbol, from_date=args.from_date, to_date=args.to_date,
+                       feed=args.feed, refresh=args.refresh)
+    config = BacktestConfig.for_market(market, initial_cash=INITIAL_CASH[market.currency])
+    return Scenario(df, REAL_PARAMS[market.currency], config, market,
+                    f"{symbol.upper()} 1min ({source})", synthetic=False)
+
+
+def _jquants_daily(code: str, args) -> Scenario:
     from daytrade.data.jquants import JQuantsClient
     from daytrade.data.loader import DataStore, to_ohlcv
 
-    client = JQuantsClient.from_env()
-    raw = DataStore().get_daily(client, code, from_date=from_date, to_date=to_date)
-    if raw.empty:
-        return raw
-    return to_ohlcv(raw, adjusted=True)
+    print(f"J-Quants 日足を取得: code={code}（参考。デイトレ戦略の検証には分足を使う）")
+    raw = DataStore().get_daily(JQuantsClient.from_env(), code,
+                                from_date=args.from_date, to_date=args.to_date)
+    df = to_ohlcv(raw, adjusted=True) if not raw.empty else raw
+    # 日足では VWAP/当日高値/引け前クローズは意味を持たない（1日=1バー）
+    params = StrategyParams(force_close_bar=None, max_hold_bars=10)
+    return Scenario(df, params, BacktestConfig(), JAPAN, f"{code} daily (J-Quants)", synthetic=False)
 
 
-def _print_metrics(metrics: dict, n_bars: int, currency: str = "JPY") -> None:
-    if not metrics:
-        print("トレードが発生しませんでした（条件が厳しすぎるかデータが短い）。")
-        return
+def _print_metrics(metrics: dict, n_bars: int, currency: str) -> None:
     cur = {"JPY": "円", "USD": "USD"}.get(currency, currency)
     print("\n=== バックテスト結果（手数料・スリッページ込み） ===")
     print(f"バー数            : {n_bars}")
@@ -62,33 +117,53 @@ def _print_metrics(metrics: dict, n_bars: int, currency: str = "JPY") -> None:
     print(f"平均日利          : {metrics.get('avg_daily_return', 0)*100:>11.2f} %")
     print(f"目標達成日の割合  : {metrics.get('daily_target_hit_rate', 0)*100:>11.1f} %")
     print(f"目標との差(平均)  : {metrics.get('daily_target_gap', 0)*100:>11.2f} pt")
-    print("\n※ 合成データでの配線確認用。優位性の検証ではない（README 8章）。")
 
 
-def _save_chart(result, path: str) -> None:
+def _warn_if_untradeable(sc: Scenario, num_trades: int) -> None:
+    """日本株で「1単元が元手を超えて1回も買えない」ケースを明示する（README 0章の壁）。"""
+    if num_trades or sc.df.empty:
+        return
+    unit = sc.market.min_position_value(float(sc.df["close"].median()))
+    if unit > sc.config.initial_cash:
+        print(f"\n[注意] 1単元の必要資金 ≒ {unit:,.0f} が元手 {sc.config.initial_cash:,.0f} を超えるため、"
+              "1回も買えませんでした。より低位の銘柄を選ぶか、米国株（--alpaca）で試してください。")
+
+
+def _save_chart(result, path: str, title: str, currency: str) -> None:
+    """バー連番を横軸にして描く（夜間・休日の空白を詰め、日中の売買を見やすくする）。"""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     df = result.enriched
+    x = np.arange(len(df))
+    days = pd.Index(df.index.date)
+    day_starts = np.flatnonzero(np.r_[True, days[1:] != days[:-1]])
+    step = max(1, len(day_starts) // 12)   # 日付ラベルは最大12個程度に間引く
+
     fig, (ax1, ax2) = plt.subplots(
         2, 1, figsize=(13, 8), sharex=True, gridspec_kw={"height_ratios": [2, 1]}
     )
-
-    ax1.plot(df.index, df["close"], lw=0.8, color="black", label="close")
-    ax1.plot(df.index, df["vwap"], lw=0.7, color="orange", alpha=0.7, label="VWAP")
-    entries = df[df["action"] == "enter_long"]
-    exits = df[df["action"] == "exit"]
-    ax1.scatter(entries.index, entries["close"], marker="^", color="green", s=60, label="entry", zorder=5)
-    ax1.scatter(exits.index, exits["close"], marker="v", color="red", s=60, label="exit", zorder=5)
+    ax1.plot(x, df["close"], lw=0.8, color="black", label="close")
+    ax1.plot(x, df["vwap"], lw=0.7, color="orange", alpha=0.8, label="VWAP")
+    entries = np.flatnonzero(df["action"].to_numpy() == "enter_long")
+    exits = np.flatnonzero(df["action"].to_numpy() == "exit")
+    ax1.scatter(entries, df["close"].iloc[entries], marker="^", color="green", s=50, label="entry", zorder=5)
+    ax1.scatter(exits, df["close"].iloc[exits], marker="v", color="red", s=50, label="exit", zorder=5)
     ax1.set_ylabel("price")
     ax1.legend(loc="upper left")
-    ax1.set_title("Daytrade strategy demo (synthetic intraday)")
+    ax1.set_title(f"Daytrade strategy demo ({title})")
 
-    ax2.plot(result.equity_curve.index, result.equity_curve.values, color="navy", lw=1.0)
+    ax2.plot(x, result.equity_curve.to_numpy(), color="navy", lw=1.0)
     ax2.axhline(result.metrics.get("initial_cash", 0), color="grey", ls="--", lw=0.8)
-    ax2.set_ylabel("equity (JPY)")
-    ax2.set_xlabel("time")
+    ax2.set_ylabel(f"equity ({currency})")
+
+    for ax in (ax1, ax2):
+        for s in day_starts:
+            ax.axvline(s, color="#dddddd", lw=0.6, zorder=0)
+    ax2.set_xticks(day_starts[::step])
+    ax2.set_xticklabels([str(days[i]) for i in day_starts[::step]], rotation=45, ha="right")
+    ax2.set_xlabel("session (gaps between days removed)")
 
     fig.tight_layout()
     fig.savefig(path, dpi=120)
@@ -97,60 +172,50 @@ def _save_chart(result, path: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="デイトレ戦略 end-to-end デモ")
-    parser.add_argument("--jquants", metavar="CODE", default=None,
-                        help="J-Quants free の日足を使う銘柄コード（省略時は合成分足）")
+    src = parser.add_mutually_exclusive_group()
+    src.add_argument("--alpaca", metavar="SYMBOL", help="Alpaca の米国株分足で実行（例: AAPL）")
+    src.add_argument("--jquants-minute", metavar="CODE", help="J-Quants の日本株分足で実行（例: 7203）")
+    src.add_argument("--jquants", metavar="CODE", help="J-Quants の日足で実行（参考）")
     parser.add_argument("--from", dest="from_date", default=None, help="開始日 YYYY-MM-DD")
     parser.add_argument("--to", dest="to_date", default=None, help="終了日 YYYY-MM-DD")
+    parser.add_argument("--feed", choices=["sip", "iex"], default="sip",
+                        help="Alpaca のデータソース（既定 sip。権限エラー時は iex）")
+    parser.add_argument("--refresh", action="store_true", help="分足キャッシュを無視して再取得")
     parser.add_argument("--days", type=int, default=20, help="合成データの日数")
     parser.add_argument("--market", choices=["jp", "us"], default="jp",
-                        help="市場プロファイル（jp=単元株100/円、us=1株単位/USD）")
+                        help="合成データの市場プロファイル（jp=単元株100/円、us=1株単位/USD）")
     parser.add_argument("--out", default=None, help="チャートPNGの保存先（省略時は保存しない）")
     args = parser.parse_args(argv)
 
-    initial_cash = 300_000.0
+    real_source = ("alpaca", args.alpaca) if args.alpaca else \
+        ("jquants", args.jquants_minute) if args.jquants_minute else None
+    if real_source and not (args.from_date and args.to_date):
+        parser.error("実データの分足には --from と --to が必要です（例: --from 2026-09-01 --to 2026-09-30）")
 
-    if args.jquants:
-        print(f"J-Quants(free) 日足を取得: code={args.jquants}")
-        df = _load_jquants_daily(args.jquants, args.from_date, args.to_date)
-        if df.empty:
-            print("データが0件でした。free は12週間遅延のため、古い日付範囲を指定してください。")
-            return 0
-        # 日足では VWAP/当日高値/引け前クローズは意味を持たない（1日=1バー）。
-        # 設定を日足向けに緩め、SMAクロス＋出来高でのみ判定する。
-        params = StrategyParams(
-            fast_period=5, slow_period=20, atr_period=14, volume_avg_period=20,
-            force_close_bar=None, max_hold_bars=10,
-        )
-    else:
-        # 市場プロファイルで価格帯・資金・最低注文単位を切り替える
-        if args.market == "us":
-            base_price, initial_cash = 150.0, 2000.0   # $150 銘柄・$2,000（≒30万円）
+    try:
+        if real_source:
+            sc = _real_intraday(*real_source, args)
+        elif args.jquants:
+            sc = _jquants_daily(args.jquants, args)
         else:
-            base_price, initial_cash = 1000.0, 300_000.0
-        print(f"合成分足データを生成: {args.days} 日分 / market={args.market}")
-        df = make_intraday_ohlcv(n_days=args.days, base_price=base_price)
-        # デモが視覚的に分かりやすいよう、短めのMAで取引頻度を上げている
-        # （優位性の主張ではなく配線確認用。実検証では実データで再調整する）
-        # トレーリング・段階利確も有効化して決済ロジックの拡張を見せる（README 6・7章）
-        params = StrategyParams(
-            fast_period=3, slow_period=10, volume_surge_mult=1.3,
-            force_close_bar=55, max_hold_bars=20,
-            trailing_stop_atr_mult=1.5, scale_out_atr_mult=1.0, scale_out_fraction=0.5,
-        )
+            sc = _synthetic(args)
+    except RuntimeError as exc:   # JQuantsError / AlpacaError（認証・権限・レート制限）
+        print(f"[エラー] {exc}", file=sys.stderr)
+        return 1
 
-    if args.jquants:
-        config = BacktestConfig()  # 日本株（J-Quants）は既定（単元株100・円）
-        currency = "JPY"
-    else:
-        profile = get_profile(args.market)
-        config = BacktestConfig.for_market(profile, initial_cash=initial_cash)
-        currency = profile.currency
-    result = run_backtest(df, params, config)
-    _print_metrics(result.metrics, len(df), currency)
+    if sc.df.empty:
+        print("データが0件でした。期間（休場日のみでないか）・銘柄コード・契約プランを確認してください。")
+        return 0
+
+    result = run_backtest(sc.df, sc.params, sc.config)
+    _print_metrics(result.metrics, len(sc.df), sc.market.currency)
+    _warn_if_untradeable(sc, result.metrics["num_trades"])
+    print("\n※ " + ("合成データでの配線確認用。優位性の検証ではない（README 8章）。" if sc.synthetic else
+                    "実データ・1銘柄・単一期間の結果。優位性の判断は複数期間のウォークフォワードで（README 8章）。"))
 
     if args.out:
         try:
-            _save_chart(result, args.out)
+            _save_chart(result, args.out, sc.title, sc.market.currency)
         except ImportError:
             print("matplotlib 未導入のためチャートは省略（pip install matplotlib）。", file=sys.stderr)
     return 0

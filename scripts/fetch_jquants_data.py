@@ -4,7 +4,7 @@
 日足を取得 → ローカルにキャッシュ(parquet/CSV) → バックテスト用 OHLCV に整形、までを
 一括で行う。流動性スクリーニング（売買代金上位）と、取得漏れの営業日チェックも兼ねる。
 
-事前準備は fetch_jquants_minimal.py と同じ（.env に認証情報）。free は12週間遅延。
+事前準備は fetch_jquants_minimal.py と同じ（.env に JQUANTS_API_KEY）。free は12週間遅延。
 
 実行例:
     # 1銘柄を取得・キャッシュして OHLCV を表示

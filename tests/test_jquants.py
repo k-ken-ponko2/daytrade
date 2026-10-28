@@ -1,6 +1,6 @@
 """J-Quants 連携のテスト（HTTP モック・ネットワーク/認証情報不要）。
 
-FakeSession で API レスポンスを差し替え、認証フロー・ページネーション・整形・
+FakeSession で J-Quants V2 のレスポンスを差し替え、APIキー認証・ページネーション・カラム名の正規化・分足整形・
 キャッシュ・カレンダー・スクリーニングを検証する。CI でもそのまま回せる。
 """
 
@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from daytrade.data.calendar import business_days, missing_sessions
-from daytrade.data.jquants import JQuantsClient
+from daytrade.data.jquants import JQuantsClient, JQuantsError, to_intraday_ohlcv
 from daytrade.data.loader import DataStore, to_ohlcv
 from daytrade.data.screening import attach_listed_info, rank_by_turnover, screen_liquid_stocks
 
@@ -39,76 +39,147 @@ def _daily_row(date, code, close, volume, turnover):
     }
 
 
+_V1_TO_V2 = {
+    "Open": "O", "High": "H", "Low": "L", "Close": "C", "Volume": "Vo",
+    "TurnoverValue": "Va", "AdjustmentFactor": "AdjFactor",
+    "AdjustmentOpen": "AdjO", "AdjustmentHigh": "AdjH", "AdjustmentLow": "AdjL",
+    "AdjustmentClose": "AdjC", "AdjustmentVolume": "AdjVo",
+    "HolidayDivision": "HolDiv", "CompanyName": "CoName", "MarketCodeName": "MktNm",
+}
+
+
+def _v2(rows):
+    """テスト用に V1 名で書いた行を V2 の短縮名に変換する（API が返す形）。"""
+    return [{_V1_TO_V2.get(k, k): v for k, v in r.items()} for r in rows]
+
+
 class FakeSession:
-    def __init__(self, *, daily_pages=None, by_date=None, calendar=None, listed=None):
-        self.daily_pages = daily_pages or []        # code 指定: 順に返すページ
+    """J-Quants V2 のレスポンスを返すモック。x-api-key ヘッダの有無も検証する。"""
+
+    def __init__(self, *, daily_pages=None, by_date=None, calendar=None, listed=None,
+                 minute_pages=None, status=200):
+        self.daily_pages = daily_pages or []        # code 指定: 順に返すページ（V1名で記述）
         self.by_date = by_date or {}                # date 指定: {date: [rows]}
         self.calendar = calendar or []
         self.listed = listed or []
+        self.minute_pages = minute_pages or []
+        self.status = status
         self.get_calls = []
         self._daily_idx = 0
-
-    def post(self, url, **kw):
-        if url.endswith("/token/auth_user"):
-            return FakeResponse(200, {"refreshToken": "refresh-token"})
-        if url.endswith("/token/auth_refresh"):
-            return FakeResponse(200, {"idToken": "id-token"})
-        return FakeResponse(404, {"message": "unknown"})
+        self._minute_idx = 0
 
     def get(self, url, headers=None, params=None, timeout=None):
         params = params or {}
-        self.get_calls.append((url, dict(params)))
+        self.get_calls.append((url, dict(params), dict(headers or {})))
+        assert (headers or {}).get("x-api-key"), "x-api-key ヘッダが必要"
+        if self.status >= 400:
+            return FakeResponse(self.status, {"message": "error"})
 
-        if "/prices/daily_quotes" in url:
+        if url.endswith("/v2/equities/bars/daily"):
             if "date" in params:
-                return FakeResponse(200, {"daily_quotes": self.by_date.get(params["date"], [])})
+                return FakeResponse(200, {"data": _v2(self.by_date.get(params["date"], []))})
             page = self.daily_pages[self._daily_idx]
             self._daily_idx += 1
+            return FakeResponse(200, {**page, "data": _v2(page["data"])})
+
+        if url.endswith("/v2/equities/bars/minute"):
+            page = self.minute_pages[self._minute_idx]
+            self._minute_idx += 1
             return FakeResponse(200, page)
 
-        if "/markets/trading_calendar" in url:
-            return FakeResponse(200, {"trading_calendar": self.calendar})
+        if url.endswith("/v2/markets/calendar"):
+            return FakeResponse(200, {"data": _v2(self.calendar)})
 
-        if "/listed/info" in url:
-            return FakeResponse(200, {"info": self.listed})
+        if url.endswith("/v2/equities/master"):
+            return FakeResponse(200, {"data": _v2(self.listed)})
 
         return FakeResponse(404, {"message": "unknown"})
 
 
 def _client(session):
-    return JQuantsClient(email="a@b.c", password="pw", session=session)
+    return JQuantsClient("test-key", session=session)
 
 
 # --------------------------------------------------------------------------- #
 # 認証・取得・ページネーション
 # --------------------------------------------------------------------------- #
-def test_authenticate_fetches_id_token():
-    client = _client(FakeSession())
-    client.authenticate()
-    assert client._id_token == "id-token"
-    assert client._refresh_token == "refresh-token"
+def test_from_env_requires_api_key(monkeypatch):
+    monkeypatch.delenv("JQUANTS_API_KEY", raising=False)
+    monkeypatch.setenv("JQUANTS_EMAIL", "a@b.c")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *a, **k: None)
+    with pytest.raises(JQuantsError, match="V1"):
+        JQuantsClient.from_env()
 
 
-def test_get_daily_quotes_paginates_and_sorts():
+def test_from_env_reads_api_key(monkeypatch):
+    monkeypatch.setenv("JQUANTS_API_KEY", "k")
+    assert JQuantsClient.from_env()._api_key == "k"
+
+
+def test_get_daily_quotes_paginates_sorts_and_renames():
     pages = [
-        {"daily_quotes": [_daily_row("2024-01-02", "7203", 102, 100, 1000)],
-         "pagination_key": "k1"},
-        {"daily_quotes": [_daily_row("2024-01-01", "7203", 101, 90, 900)]},  # 末尾・古い日付
+        {"data": [_daily_row("2024-01-02", "72030", 102, 100, 1000)], "pagination_key": "k1"},
+        {"data": [_daily_row("2024-01-01", "72030", 101, 90, 900)]},  # 末尾・古い日付
     ]
-    client = _client(FakeSession(daily_pages=pages))
-    df = client.get_daily_quotes(code="7203")
+    session = FakeSession(daily_pages=pages)
+    df = _client(session).get_daily_quotes(code="7203")
     assert len(df) == 2
-    # ページをまたいで結合され、Date 昇順に並ぶ
     assert list(df["Date"]) == [pd.Timestamp("2024-01-01"), pd.Timestamp("2024-01-02")]
+    # V2 の短縮名は V1 互換の長い名前に戻る
+    assert {"Open", "AdjustmentClose", "TurnoverValue"} <= set(df.columns)
+    # 2ページ目は pagination_key 付きで要求される
+    assert session.get_calls[1][1]["pagination_key"] == "k1"
 
 
 def test_get_trading_calendar_parses_dates():
     cal = [{"Date": "2024-01-01", "HolidayDivision": "0"},
            {"Date": "2024-01-04", "HolidayDivision": "1"}]
-    client = _client(FakeSession(calendar=cal))
-    df = client.get_trading_calendar(from_date="2024-01-01", to_date="2024-01-04")
+    df = _client(FakeSession(calendar=cal)).get_trading_calendar(
+        from_date="2024-01-01", to_date="2024-01-04")
     assert len(df) == 2
     assert df["Date"].dtype.kind == "M"  # datetime
+    assert list(df["HolidayDivision"]) == ["0", "1"]
+
+
+def test_http_error_has_hint():
+    with pytest.raises(JQuantsError, match="アドオン"):
+        _client(FakeSession(status=403)).get_minute_bars("7203", date="2026-09-01")
+
+
+# --------------------------------------------------------------------------- #
+# 分足
+# --------------------------------------------------------------------------- #
+def _minute_row(date, time, close, volume, code="72030"):
+    return {"Date": date, "Time": time, "Code": code,
+            "O": close, "H": close + 1, "L": close - 1, "C": close, "Vo": volume, "Va": close * volume}
+
+
+def test_get_minute_bars_requires_code_or_date():
+    with pytest.raises(JQuantsError):
+        _client(FakeSession()).get_minute_bars()
+
+
+def test_minute_bars_to_intraday_ohlcv():
+    pages = [
+        # V2 は行順を保証しない → 逆順・ページまたぎで返しても並べ替えられること
+        {"data": [_minute_row("2026-09-02", "09:01", 101, 200),
+                  _minute_row("2026-09-01", "15:30", 99, 500)], "pagination_key": "p"},
+        {"data": [_minute_row("2026-09-02", "09:00", 100, 300),
+                  _minute_row("2026-09-02", "09:00", 100, 1, code="99990")]},  # 別銘柄
+    ]
+    raw = _client(FakeSession(minute_pages=pages)).get_minute_bars(
+        "7203", from_date="2026-09-01", to_date="2026-09-02")
+    out = to_intraday_ohlcv(raw, code="7203")
+    assert list(out.index) == [pd.Timestamp("2026-09-01 15:30"),
+                               pd.Timestamp("2026-09-02 09:00"),
+                               pd.Timestamp("2026-09-02 09:01")]
+    assert list(out.columns[:5]) == ["open", "high", "low", "close", "volume"]
+    assert out["volume"].tolist() == [500, 300, 200]   # 別銘柄の行は除外
+    assert out.index.tz is None                        # 取引所ローカル(JST)の naive
+
+
+def test_intraday_ohlcv_empty():
+    assert to_intraday_ohlcv(pd.DataFrame()).empty
 
 
 # --------------------------------------------------------------------------- #
@@ -246,7 +317,7 @@ def test_screen_liquid_stocks_end_to_end():
                        _daily_row("2024-01-16", "6758", 201, 400, 900_000)],
     }
     listed = [{"Code": "7203", "CompanyName": "Toyota", "MarketCodeName": "Prime"},
-              {"Code": "6758", "CompanyName": "Sony", "MarketCodeName": "Prime"}]
+              {"Code": "6758", "CompanyName": "Sony", "MarketCodeName": "Prime"}]  # V2名に変換されて返る
     client = _client(FakeSession(by_date=by_date, listed=listed))
     ranked = screen_liquid_stocks(client, ["2024-01-15", "2024-01-16"], top_n=5)
     assert list(ranked["Code"]) == ["7203", "6758"]  # トヨタの方が代金大

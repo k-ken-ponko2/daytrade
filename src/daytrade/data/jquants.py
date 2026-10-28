@@ -1,14 +1,16 @@
-"""J-Quants API クライアント（最小実装）。
+"""J-Quants API クライアント（V2・APIキー方式）。
 
-認証フロー（公式）:
-  1. メール＋パスワード → リフレッシュトークン (/token/auth_user)
-  2. リフレッシュトークン → IDトークン (/token/auth_refresh)  ※有効期限が短い
-  3. IDトークンを Authorization ヘッダに付けて各APIを叩く
+V1（メール＋パスワード → リフレッシュトークン → IDトークン）は 2026-06-01 に廃止された。
+V2 はダッシュボードで発行した APIキーを `x-api-key` ヘッダに付けるだけで使える。
 
-Free プランでも認証と日足取得は動く（データは12週間遅延）。分足は有償アドオン。
-まず Free で疎通を確認し、骨格ができてから Standard＋分足を契約する方針（README 3章）。
+V2 はレスポンスのカラム名が短縮されている（Open→O、AdjustmentClose→AdjC など）。
+このクライアントは取得結果を **V1 と同じ長いカラム名に正規化して返す**。こうすることで
+loader / calendar / screening やキャッシュ済みデータはそのまま使い続けられる。
 
-参考: https://jpx.gitbook.io/j-quants-ja/
+分足（/equities/bars/minute）は「株価 分足・ティック」アドオン（Light プラン以上）が必要。
+分足は分割未調整・JST・約定のない分は欠落、という仕様なので to_intraday_ohlcv() で整える。
+
+参考: https://jpx-jquants.com/ja/spec
 """
 
 from __future__ import annotations
@@ -19,34 +21,65 @@ from typing import Any
 import pandas as pd
 import requests
 
-API_BASE = "https://api.jquants.com/v1"
+API_BASE = "https://api.jquants.com/v2"
 DEFAULT_TIMEOUT = 30
+
+# V2 の短縮名 → 既存コードが使う V1 の長い名前
+_DAILY_COLUMNS = {
+    "O": "Open", "H": "High", "L": "Low", "C": "Close",
+    "Vo": "Volume", "Va": "TurnoverValue",
+    "AdjFactor": "AdjustmentFactor",
+    "AdjO": "AdjustmentOpen", "AdjH": "AdjustmentHigh", "AdjL": "AdjustmentLow",
+    "AdjC": "AdjustmentClose", "AdjVo": "AdjustmentVolume",
+}
+_MINUTE_COLUMNS = {
+    "O": "Open", "H": "High", "L": "Low", "C": "Close",
+    "Vo": "Volume", "Va": "TurnoverValue",
+}
+_CALENDAR_COLUMNS = {"HolDiv": "HolidayDivision"}
+_MASTER_COLUMNS = {
+    "CoName": "CompanyName", "CoNameEn": "CompanyNameEnglish",
+    "S17": "Sector17Code", "S17Nm": "Sector17CodeName",
+    "S33": "Sector33Code", "S33Nm": "Sector33CodeName",
+    "ScaleCat": "ScaleCategory", "Mkt": "MarketCode", "MktNm": "MarketCodeName",
+    "Mrgn": "MarginCode", "MrgnNm": "MarginCodeName",
+}
+
+OHLCV_COLUMNS = ["open", "high", "low", "close", "volume"]
 
 
 class JQuantsError(RuntimeError):
     """J-Quants API 呼び出しの失敗。"""
 
 
+def _date_param(value: str | None) -> str | None:
+    """'YYYY-MM-DD' / 'YYYYMMDD' のどちらでも受ける（V2 は両方可）。"""
+    return value or None
+
+
+def _to_frame(rows: list[dict], columns: dict[str, str], sort_by: list[str]) -> pd.DataFrame:
+    """レスポンス行を DataFrame にし、カラム名を正規化して日付で昇順に並べる。"""
+    df = pd.DataFrame(rows).rename(columns=columns)
+    if df.empty or "Date" not in df.columns:
+        return df
+    df["Date"] = pd.to_datetime(df["Date"])
+    keys = [k for k in sort_by if k in df.columns]
+    return df.sort_values(keys).reset_index(drop=True)
+
+
 class JQuantsClient:
-    """J-Quants API の薄いラッパ。
+    """J-Quants API V2 の薄いラッパ。
 
     使い方:
-        client = JQuantsClient.from_env()      # .env / 環境変数から認証
-        df = client.get_daily_quotes("7203")   # トヨタの日足
+        client = JQuantsClient.from_env()            # .env の JQUANTS_API_KEY を使う
+        df = client.get_daily_quotes("7203")         # 日足（カラム名は V1 互換）
+        mdf = client.get_minute_bars("7203", from_date="2026-09-01", to_date="2026-09-05")
     """
 
-    def __init__(
-        self,
-        email: str | None = None,
-        password: str | None = None,
-        refresh_token: str | None = None,
-        *,
-        session: requests.Session | None = None,
-    ) -> None:
-        self._email = email
-        self._password = password
-        self._refresh_token = refresh_token
-        self._id_token: str | None = None
+    def __init__(self, api_key: str, *, session: requests.Session | None = None) -> None:
+        if not api_key:
+            raise JQuantsError("APIキーが空です。")
+        self._api_key = api_key
         self._session = session or requests.Session()
 
     # ------------------------------------------------------------------ #
@@ -54,10 +87,7 @@ class JQuantsClient:
     # ------------------------------------------------------------------ #
     @classmethod
     def from_env(cls) -> "JQuantsClient":
-        """環境変数（.env 含む）から認証情報を読み込む。
-
-        JQUANTS_REFRESH_TOKEN があればそれを優先。なければ EMAIL/PASSWORD を使う。
-        """
+        """環境変数（.env 含む）の JQUANTS_API_KEY から生成する。"""
         try:
             from dotenv import load_dotenv
 
@@ -65,82 +95,49 @@ class JQuantsClient:
         except ImportError:
             pass  # python-dotenv 未導入でも環境変数が直接あれば動く
 
-        refresh_token = os.getenv("JQUANTS_REFRESH_TOKEN")
-        email = os.getenv("JQUANTS_EMAIL")
-        password = os.getenv("JQUANTS_PASSWORD")
-
-        if not refresh_token and not (email and password):
+        api_key = os.getenv("JQUANTS_API_KEY")
+        if not api_key:
+            hint = ""
+            if os.getenv("JQUANTS_EMAIL") or os.getenv("JQUANTS_REFRESH_TOKEN"):
+                hint = "（メール/パスワード・リフレッシュトークン方式の V1 は 2026-06-01 に廃止済み）"
             raise JQuantsError(
-                "認証情報が見つかりません。.env に JQUANTS_EMAIL / JQUANTS_PASSWORD "
-                "（または JQUANTS_REFRESH_TOKEN）を設定してください。"
+                "APIキーが見つかりません。J-Quants のダッシュボード「設定 » APIキー」で発行し、"
+                f".env に JQUANTS_API_KEY を設定してください。{hint}"
             )
-        return cls(email=email, password=password, refresh_token=refresh_token)
+        return cls(api_key)
 
-    # ------------------------------------------------------------------ #
-    # 認証
-    # ------------------------------------------------------------------ #
-    def _fetch_refresh_token(self) -> str:
-        if not (self._email and self._password):
-            raise JQuantsError("リフレッシュトークン取得にはメールとパスワードが必要です。")
-        resp = self._session.post(
-            f"{API_BASE}/token/auth_user",
-            json={"mailaddress": self._email, "password": self._password},
-            timeout=DEFAULT_TIMEOUT,
-        )
-        self._raise_for_status(resp)
-        token = resp.json().get("refreshToken")
-        if not token:
-            raise JQuantsError("リフレッシュトークンの取得に失敗しました。")
-        return token
+    def authenticate(self) -> None:
+        """疎通確認。V2 はトークン発行が不要なので、APIキーでカレンダーを1週間分だけ取得してみる。
 
-    def _fetch_id_token(self, refresh_token: str) -> str:
-        resp = self._session.post(
-            f"{API_BASE}/token/auth_refresh",
-            params={"refreshtoken": refresh_token},
-            timeout=DEFAULT_TIMEOUT,
-        )
-        self._raise_for_status(resp)
-        token = resp.json().get("idToken")
-        if not token:
-            raise JQuantsError("IDトークンの取得に失敗しました。")
-        return token
-
-    def authenticate(self, force: bool = False) -> None:
-        """IDトークンを取得して内部に保持する。"""
-        if self._id_token and not force:
-            return
-        if not self._refresh_token:
-            self._refresh_token = self._fetch_refresh_token()
-        self._id_token = self._fetch_id_token(self._refresh_token)
-
-    @property
-    def _auth_headers(self) -> dict[str, str]:
-        if not self._id_token:
-            self.authenticate()
-        return {"Authorization": f"Bearer {self._id_token}"}
+        Free プランは「直近12週間を除く2年分」なので、約半年前の日付を使う。
+        """
+        start = pd.Timestamp.today().normalize() - pd.Timedelta(days=180)
+        self._get_paginated("/markets/calendar", {
+            "from": start.strftime("%Y-%m-%d"),
+            "to": (start + pd.Timedelta(days=6)).strftime("%Y-%m-%d"),
+        })
 
     # ------------------------------------------------------------------ #
     # データ取得
     # ------------------------------------------------------------------ #
-    def _get_paginated(self, path: str, params: dict[str, Any], key: str) -> list[dict]:
-        """ページネーション対応の GET。全ページを結合して返す。"""
+    def _get_paginated(self, path: str, params: dict[str, Any]) -> list[dict]:
+        """ページネーション対応の GET。V2 は全エンドポイントで data / pagination_key。"""
         results: list[dict] = []
-        query = dict(params)
+        query = {k: v for k, v in params.items() if v is not None}
         while True:
             resp = self._session.get(
                 f"{API_BASE}{path}",
-                headers=self._auth_headers,
+                headers={"x-api-key": self._api_key},
                 params=query,
                 timeout=DEFAULT_TIMEOUT,
             )
             self._raise_for_status(resp)
             payload = resp.json()
-            results.extend(payload.get(key, []))
+            results.extend(payload.get("data", []))
             pagination_key = payload.get("pagination_key")
             if not pagination_key:
-                break
+                return results
             query["pagination_key"] = pagination_key
-        return results
 
     def get_daily_quotes(
         self,
@@ -150,33 +147,43 @@ class JQuantsClient:
         from_date: str | None = None,
         to_date: str | None = None,
     ) -> pd.DataFrame:
-        """日足株価 (/prices/daily_quotes)。
+        """日足株価 (/equities/bars/daily)。
 
         code 指定で1銘柄の期間取得、date 指定で全銘柄の1日分が取れる。
-        日付は "YYYY-MM-DD" 形式。戻り値は Date 昇順の DataFrame。
+        戻り値は Date 昇順。カラム名は V1 互換（Open / AdjustmentClose / TurnoverValue …）。
         """
-        params: dict[str, Any] = {}
-        if code:
-            params["code"] = code
-        if date:
-            params["date"] = date
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
+        rows = self._get_paginated("/equities/bars/daily", {
+            "code": code, "date": _date_param(date),
+            "from": _date_param(from_date), "to": _date_param(to_date),
+        })
+        return _to_frame(rows, _DAILY_COLUMNS, ["Date", "Code"])
 
-        rows = self._get_paginated("/prices/daily_quotes", params, key="daily_quotes")
-        df = pd.DataFrame(rows)
-        if not df.empty and "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"])
-            df = df.sort_values("Date").reset_index(drop=True)
-        return df
+    def get_minute_bars(
+        self,
+        code: str | None = None,
+        *,
+        date: str | None = None,
+        from_date: str | None = None,
+        to_date: str | None = None,
+    ) -> pd.DataFrame:
+        """分足 (/equities/bars/minute)。「株価 分足・ティック」アドオンが必要。
 
-    def get_listed_info(self, code: str | None = None) -> pd.DataFrame:
-        """上場銘柄一覧 (/listed/info)。code 省略で全銘柄。"""
-        params = {"code": code} if code else {}
-        rows = self._get_paginated("/listed/info", params, key="info")
-        return pd.DataFrame(rows)
+        code か date のどちらかが必須。保存期間は過去2年。価格は分割未調整。
+        戻り値は Date / Time / Code / Open / High / Low / Close / Volume / TurnoverValue。
+        V2 は行の順序を保証しないので、Date→Time で並べ替えて返す。
+        """
+        if not code and not date:
+            raise JQuantsError("分足の取得には code か date の指定が必要です。")
+        rows = self._get_paginated("/equities/bars/minute", {
+            "code": code, "date": _date_param(date),
+            "from": _date_param(from_date), "to": _date_param(to_date),
+        })
+        return _to_frame(rows, _MINUTE_COLUMNS, ["Code", "Date", "Time"])
+
+    def get_listed_info(self, code: str | None = None, *, date: str | None = None) -> pd.DataFrame:
+        """上場銘柄一覧 (/equities/master)。code 省略で全銘柄。"""
+        rows = self._get_paginated("/equities/master", {"code": code, "date": _date_param(date)})
+        return pd.DataFrame(rows).rename(columns=_MASTER_COLUMNS)
 
     def get_trading_calendar(
         self,
@@ -185,38 +192,63 @@ class JQuantsClient:
         to_date: str | None = None,
         holiday_division: str | None = None,
     ) -> pd.DataFrame:
-        """取引カレンダー (/markets/trading_calendar)。
+        """取引カレンダー (/markets/calendar)。
 
-        各日付の HolidayDivision を返す:
+        各日付の HolidayDivision（V2 では HolDiv）を返す:
             "0" 非営業日 / "1" 営業日 / "2" 東証半日立会日 / "3" 祝日取引あり非営業日
-        戻り値は Date 昇順、Date は datetime に変換済み。
         """
-        params: dict[str, Any] = {}
-        if from_date:
-            params["from"] = from_date
-        if to_date:
-            params["to"] = to_date
-        if holiday_division:
-            params["holidaydivision"] = holiday_division
-
-        rows = self._get_paginated(
-            "/markets/trading_calendar", params, key="trading_calendar"
-        )
-        df = pd.DataFrame(rows)
-        if not df.empty and "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"])
-            df = df.sort_values("Date").reset_index(drop=True)
-        return df
+        rows = self._get_paginated("/markets/calendar", {
+            "from": _date_param(from_date), "to": _date_param(to_date),
+            "hol_div": holiday_division,
+        })
+        return _to_frame(rows, _CALENDAR_COLUMNS, ["Date"])
 
     # ------------------------------------------------------------------ #
     # 内部
     # ------------------------------------------------------------------ #
     @staticmethod
     def _raise_for_status(resp: requests.Response) -> None:
-        if resp.status_code >= 400:
-            detail = ""
-            try:
-                detail = resp.json().get("message", "")
-            except Exception:  # noqa: BLE001 - 本文がJSONでないことがある
-                detail = resp.text[:200]
-            raise JQuantsError(f"HTTP {resp.status_code}: {detail}")
+        if resp.status_code < 400:
+            return
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:  # noqa: BLE001 - 本文がJSONでないことがある
+            detail = resp.text[:200]
+        hints = {
+            401: "APIキーが無効です。ダッシュボードで再発行してください。",
+            403: "契約プランでは利用できないデータです（分足はアドオン契約が必要）。",
+            429: "レート制限に達しました。少し待ってから再実行してください。",
+        }
+        hint = hints.get(resp.status_code, "")
+        raise JQuantsError(f"HTTP {resp.status_code}: {detail} {hint}".strip())
+
+
+def to_intraday_ohlcv(minute: pd.DataFrame, *, code: str | None = None) -> pd.DataFrame:
+    """get_minute_bars() の結果をバックテスト用 OHLCV（JSTの naive DatetimeIndex）に整える。
+
+    - index は「日付＋バー開始時刻」。naive のまま返すと、指標計算は取引所ローカル時刻として
+      日付ごとに VWAP / 当日高値 / バー連番をリセットする（core.indicators）。
+    - 複数銘柄が混ざっている場合は code で1銘柄に絞る（4桁指定なら末尾0を補う）。
+    - 約定のない分は J-Quants 側で欠落している。埋めずにそのまま使う（出来高0の偽バーを作らない）。
+    - 価格は分割未調整。分割日をまたぐ期間では SMA/ATR が不連続になるので期間を区切って使う。
+    """
+    if minute.empty:
+        return pd.DataFrame(columns=OHLCV_COLUMNS)
+    df = minute
+    if code is not None and "Code" in df.columns:
+        target = code if len(code) == 5 else f"{code}0"
+        df = df[df["Code"].astype(str) == target]
+        if df.empty:
+            return pd.DataFrame(columns=OHLCV_COLUMNS)
+
+    stamp = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d") + " " + df["Time"].astype(str)
+    out = pd.DataFrame(
+        {std: pd.to_numeric(df[src].values, errors="coerce")
+         for std, src in (("open", "Open"), ("high", "High"), ("low", "Low"),
+                          ("close", "Close"), ("volume", "Volume"))},
+        index=pd.DatetimeIndex(pd.to_datetime(stamp.values), name="datetime"),
+    )
+    if "TurnoverValue" in df.columns:
+        out["turnover"] = pd.to_numeric(df["TurnoverValue"].values, errors="coerce")
+    out = out[~out.index.duplicated(keep="last")].sort_index()
+    return out.dropna(subset=OHLCV_COLUMNS)
